@@ -10,8 +10,10 @@ class Config:
     # API Keys
     BINANCE_TESTNET_API_KEY: str = os.getenv("BINANCE_TESTNET_API_KEY", "")
     BINANCE_TESTNET_API_SECRET: str = os.getenv("BINANCE_TESTNET_API_SECRET", "")
+    TELEGRAM_ENABLED: bool = os.getenv("TELEGRAM_ENABLED", "false").lower() == "true"
     TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
     TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
+    BARK_ENABLED: bool = os.getenv("BARK_ENABLED", "false").lower() == "true"
     BARK_URL: str = os.getenv("BARK_URL", "")
 
     # Capital & Position

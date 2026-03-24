@@ -11,7 +11,29 @@ from notifier import notify, logger
 
 
 def main():
+    logger.info("=" * 60)
     logger.info("Starting DualTrend Bollinger Strategy Bot")
+    logger.info("=" * 60)
+
+    # Print config summary
+    logger.info("[配置] 初始资金: $%.2f | 单仓: $%.2f | 最大持仓: %d",
+                config.INITIAL_CAPITAL, config.POSITION_SIZE, config.MAX_POSITIONS)
+    logger.info("[配置] 杠杆: %dx | 多单止损: %.1f%% | 空单止损: %.1f%%",
+                config.LEVERAGE, config.LONG_TRAILING_STOP * 100, config.SHORT_TRAILING_STOP * 100)
+    logger.info("[配置] 布林带: SMA%d ± %.1fσ | 扫描前 %d 大成交量币种",
+                config.BB_PERIOD, config.BB_STD, config.TOP_SYMBOLS_COUNT)
+
+    # Print notification channel status
+    channels = ["日志: ON"]
+    if config.TELEGRAM_ENABLED:
+        channels.append("Telegram: ON")
+    else:
+        channels.append("Telegram: OFF")
+    if config.BARK_ENABLED:
+        channels.append("Bark: ON")
+    else:
+        channels.append("Bark: OFF")
+    logger.info("[通知] %s", " | ".join(channels))
 
     # Initialize components
     exchange = Exchange()
@@ -20,10 +42,8 @@ def main():
     )
     state_mgr.load()
 
-    logger.info(
-        f"State loaded: balance={state_mgr.balance:.2f}, "
-        f"positions={state_mgr.position_count}"
-    )
+    logger.info("[状态] 余额: $%.2f | 当前持仓: %d",
+                state_mgr.balance, state_mgr.position_count)
 
     # Scheduler
     scheduler = BlockingScheduler()
@@ -77,7 +97,17 @@ def main():
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
 
+    # Print schedule info
+    logger.info("[调度] 策略检查: 每小时 :01 | 止损监控: 每 %d 分钟 | 心跳: 每 %d 小时",
+                config.RISK_CHECK_INTERVAL_MINUTES, config.HEARTBEAT_INTERVAL_HOURS)
+    logger.info("=" * 60)
+
     notify("Bot 启动", f"余额: ${state_mgr.balance:.2f} | 持仓: {state_mgr.position_count}")
+
+    # Run strategy and stop loss check immediately on startup
+    logger.info("[启动] 立即执行首次策略扫描...")
+    run_strategy(exchange, state_mgr)
+    check_stop_loss(exchange, state_mgr)
 
     try:
         scheduler.start()

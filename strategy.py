@@ -60,16 +60,22 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
         return
 
     top_symbols = exchange.get_top_symbols()
-    logger.info(f"Scanning {len(top_symbols)} symbols")
+    logger.info("=" * 60)
+    logger.info("[策略] 开始扫描 %d 个币种 | 余额: $%.2f | 持仓: %d/%d",
+                len(top_symbols), state_mgr.balance, state_mgr.position_count, config.MAX_POSITIONS)
 
     kline_limit = config.BB_PERIOD + 1
+    signal_count = 0
 
     for symbol in top_symbols:
         if state_mgr.position_count >= config.MAX_POSITIONS:
+            logger.info("[策略] 已达最大持仓数 %d，停止扫描", config.MAX_POSITIONS)
             break
         if state_mgr.balance < config.POSITION_SIZE:
+            logger.info("[策略] 余额不足 $%.2f < $%.2f，停止扫描", state_mgr.balance, config.POSITION_SIZE)
             break
         if state_mgr.get_position_by_symbol(symbol):
+            logger.debug("[策略] %s 已持仓，跳过", symbol)
             continue
 
         try:
@@ -82,6 +88,9 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
                 continue
             trend = check_trend(daily_closes, config.BB_PERIOD)
 
+            # Daily BB for logging
+            d_upper, d_middle, d_lower = calculate_bollinger_bands(daily_closes, config.BB_PERIOD, config.BB_STD)
+
             # Hourly signal
             hourly_klines = exchange.get_klines(
                 symbol, Client.KLINE_INTERVAL_1HOUR, kline_limit
@@ -91,16 +100,37 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
             if len(hourly_closes) < kline_limit:
                 continue
 
+            h_upper, h_middle, h_lower = calculate_bollinger_bands(hourly_closes, config.BB_PERIOD, config.BB_STD)
+            current_close = hourly_closes[-1]
+            current_volume = hourly_volumes[-1]
+            avg_volume = float(np.mean(hourly_volumes[-config.BB_PERIOD - 1 : -1]))
+
             signal = check_entry_signal(
                 hourly_closes, hourly_volumes, trend, config.BB_PERIOD, config.BB_STD
             )
 
+            # Log scan details
+            vol_ratio = current_volume / avg_volume if avg_volume > 0 else 0
+            logger.info(
+                "[扫描] %s | 趋势: %s | 日线中轨: %.4f | "
+                "1H收盘: %.4f | 上轨: %.4f | 下轨: %.4f | "
+                "量比: %.2f | 信号: %s",
+                symbol, trend, d_middle,
+                current_close, h_upper, h_lower,
+                vol_ratio, "YES" if signal else "-"
+            )
+
             if signal:
-                _open_position(exchange, state_mgr, symbol, trend, hourly_closes[-1])
+                signal_count += 1
+                _open_position(exchange, state_mgr, symbol, trend, current_close)
 
         except Exception as e:
-            logger.error(f"Error processing {symbol}: {e}")
+            logger.error("[策略] %s 处理异常: %s", symbol, e)
             continue
+
+    logger.info("[策略] 扫描完成 | 信号数: %d | 持仓: %d/%d | 余额: $%.2f",
+                signal_count, state_mgr.position_count, config.MAX_POSITIONS, state_mgr.balance)
+    logger.info("=" * 60)
 
 
 def _open_position(

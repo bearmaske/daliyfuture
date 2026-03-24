@@ -30,7 +30,7 @@ def notify(title: str, message: str):
 
 
 def _send_telegram(title: str, message: str):
-    if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHAT_ID:
+    if not config.TELEGRAM_ENABLED or not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHAT_ID:
         return
     try:
         from telegram import Bot
@@ -54,7 +54,7 @@ def _send_telegram(title: str, message: str):
 
 
 def _send_bark(title: str, message: str):
-    if not config.BARK_URL:
+    if not config.BARK_ENABLED or not config.BARK_URL:
         return
     try:
         encoded_title = urllib.parse.quote(title)

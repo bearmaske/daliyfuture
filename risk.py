@@ -25,7 +25,10 @@ def check_stop_loss(exchange: Exchange, state_mgr: StateManager):
     """Check all open positions for stop loss triggers."""
     positions = list(state_mgr.state.get("positions", []))
     if not positions:
+        logger.debug("[止损] 无持仓，跳过检查")
         return
+
+    logger.info("[止损] 检查 %d 个持仓", len(positions))
 
     for pos in positions:
         try:
@@ -36,6 +39,20 @@ def check_stop_loss(exchange: Exchange, state_mgr: StateManager):
             if updated_pos is None:
                 continue
 
+            # Calculate drawdown/rebound percentage
+            if updated_pos["side"] == "LONG":
+                pct = (updated_pos["highest_price"] - current_price) / updated_pos["highest_price"] * 100
+                threshold = config.LONG_TRAILING_STOP * 100
+                label = "回撤"
+                extreme_label = "最高"
+                extreme_price = updated_pos["highest_price"]
+            else:
+                pct = (current_price - updated_pos["lowest_price"]) / updated_pos["lowest_price"] * 100
+                threshold = config.SHORT_TRAILING_STOP * 100
+                label = "反弹"
+                extreme_label = "最低"
+                extreme_price = updated_pos["lowest_price"]
+
             triggered = should_stop_loss(
                 side=updated_pos["side"],
                 highest_price=updated_pos["highest_price"],
@@ -45,11 +62,21 @@ def check_stop_loss(exchange: Exchange, state_mgr: StateManager):
                 short_stop=config.SHORT_TRAILING_STOP,
             )
 
+            logger.info(
+                "[止损] %s %s | 入场: %.4f | %s: %.4f | 现价: %.4f | %s: %.2f%% / %.1f%% | %s",
+                updated_pos["symbol"], updated_pos["side"],
+                updated_pos["entry_price"],
+                extreme_label, extreme_price,
+                current_price,
+                label, pct, threshold,
+                "触发止损!" if triggered else "安全"
+            )
+
             if triggered:
                 _close_position(exchange, state_mgr, updated_pos, current_price)
 
         except Exception as e:
-            logger.error(f"Error checking stop loss for {pos['symbol']}: {e}")
+            logger.error("[止损] %s 检查异常: %s", pos["symbol"], e)
 
 
 def _close_position(
