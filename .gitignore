@@ -1,0 +1,7 @@
+.env
+state.json
+state.backup.json
+binance_paper_trading.log
+__pycache__/
+*.pyc
+.venv/
