@@ -14,7 +14,7 @@ class Config:
     TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
     TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
     BARK_ENABLED: bool = os.getenv("BARK_ENABLED", "false").lower() == "true"
-    BARK_URL: str = os.getenv("BARK_URL", "")
+    BARK_URLS: list = None
 
     # Capital & Position
     INITIAL_CAPITAL: float = 10000.0
@@ -31,7 +31,7 @@ class Config:
     BB_STD: float = 2.0
 
     # Scanning
-    TOP_SYMBOLS_COUNT: int = 50
+    TOP_SYMBOLS_COUNT: int = 30
     STABLECOIN_FILTER: list = None
 
     # Scheduling
@@ -49,6 +49,10 @@ class Config:
             self.STABLECOIN_FILTER = [
                 "BUSDUSDT", "USDCUSDT", "TUSDUSDT", "DAIUSDT", "FDUSDUSDT"
             ]
+        # Support multiple Bark URLs, comma-separated
+        if self.BARK_URLS is None:
+            raw = os.getenv("BARK_URLS", "")
+            self.BARK_URLS = [u.strip() for u in raw.split(",") if u.strip()]
 
 
 config = Config()

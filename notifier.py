@@ -54,14 +54,15 @@ def _send_telegram(title: str, message: str):
 
 
 def _send_bark(title: str, message: str):
-    if not config.BARK_ENABLED or not config.BARK_URL:
+    if not config.BARK_ENABLED or not config.BARK_URLS:
         return
-    try:
-        encoded_title = urllib.parse.quote(title)
-        encoded_message = urllib.parse.quote(message)
-        url = f"{config.BARK_URL}/{encoded_title}/{encoded_message}"
-        req = urllib.request.Request(url, method="GET")
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            pass
-    except Exception as e:
-        logger.warning(f"Bark notification failed: {e}")
+    encoded_title = urllib.parse.quote(title)
+    encoded_message = urllib.parse.quote(message)
+    for bark_url in config.BARK_URLS:
+        try:
+            url = f"{bark_url}/{encoded_title}/{encoded_message}"
+            req = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                pass
+        except Exception as e:
+            logger.warning(f"Bark notification failed ({bark_url}): {e}")
