@@ -3,8 +3,15 @@ import os
 import shutil
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional
+
+TZ_CN = timezone(timedelta(hours=8))
+
+
+def now_cn() -> str:
+    """Return current time in UTC+8, formatted as YYYY-MM-DD HH:MM:SS."""
+    return datetime.now(TZ_CN).strftime("%Y-%m-%d %H:%M:%S")
 
 
 class StateManager:
@@ -50,7 +57,7 @@ class StateManager:
                 "quantity": quantity,
                 "highest_price": entry_price,
                 "lowest_price": entry_price,
-                "opened_at": datetime.now(timezone.utc).isoformat(),
+                "opened_at": now_cn(),
             }
             self.state["positions"].append(pos)
         self.save()
@@ -116,7 +123,7 @@ class StateManager:
                 "quantity": quantity,
                 "pnl": pnl,
                 "opened_at": opened_at,
-                "closed_at": datetime.now(timezone.utc).isoformat(),
+                "closed_at": now_cn(),
             }
             self.state["trade_history"].append(trade)
         self.save()
@@ -165,7 +172,7 @@ class StateManager:
                         "quantity": rp["quantity"],
                         "highest_price": rp["entry_price"],
                         "lowest_price": rp["entry_price"],
-                        "opened_at": datetime.now(timezone.utc).isoformat(),
+                        "opened_at": rp.get("opened_at") or now_cn(),
                     }
                     self.state["positions"].append(pos)
                     added.append(rp["symbol"])

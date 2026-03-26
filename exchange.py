@@ -102,8 +102,9 @@ class Exchange:
         return 0.0
 
     def get_open_positions(self) -> list:
-        """Get all open positions from testnet account.
-        Returns list of dicts with symbol, side, entry_price, quantity."""
+        """Get all open positions from testnet account."""
+        from datetime import datetime, timezone, timedelta
+        tz_cn = timezone(timedelta(hours=8))
         positions = self._retry(
             lambda: self.testnet_client.futures_position_information()
         )
@@ -112,12 +113,17 @@ class Exchange:
             qty = float(p["positionAmt"])
             if qty == 0:
                 continue
+            update_ts = int(p.get("updateTime", 0))
+            opened_at = datetime.fromtimestamp(
+                update_ts / 1000, tz=tz_cn
+            ).strftime("%Y-%m-%d %H:%M:%S") if update_ts else None
             open_positions.append({
                 "symbol": p["symbol"],
                 "side": "LONG" if qty > 0 else "SHORT",
                 "entry_price": float(p["entryPrice"]),
                 "quantity": abs(qty),
                 "unrealized_pnl": float(p.get("unRealizedProfit", 0)),
+                "opened_at": opened_at,
             })
         return open_positions
 
