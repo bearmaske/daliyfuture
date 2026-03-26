@@ -121,6 +121,21 @@ class Exchange:
             })
         return open_positions
 
+    def sync_state(self, state_mgr) -> None:
+        """Sync local state with actual Testnet account."""
+        remote_balance = self.get_account_balance()
+        remote_positions = self.get_open_positions()
+
+        added, removed = state_mgr.sync_positions(remote_positions, remote_balance)
+
+        if added:
+            logger.info("[同步] 新增本地持仓: %s", ", ".join(added))
+        if removed:
+            logger.info("[同步] 移除本地持仓: %s", ", ".join(removed))
+
+        logger.info("[同步] Testnet 余额: $%.2f | 持仓: %d",
+                    remote_balance, len(remote_positions))
+
     def _retry(self, func, retries: int = 3, delay: int = 5):
         for i in range(retries):
             try:

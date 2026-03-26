@@ -52,9 +52,8 @@ def check_entry_signal(
 
 def run_strategy(exchange: Exchange, state_mgr: StateManager):
     """Main strategy loop: scan top symbols, check signals, open positions."""
-    # Sync with Testnet before scanning
     try:
-        _sync_with_testnet(exchange, state_mgr)
+        exchange.sync_state(state_mgr)
     except Exception as e:
         logger.warning("[策略] 同步 Testnet 失败: %s", e)
 
@@ -85,7 +84,6 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
             continue
 
         try:
-            # Daily trend
             daily_klines = exchange.get_klines(
                 symbol, Client.KLINE_INTERVAL_1DAY, kline_limit
             )
@@ -93,11 +91,8 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
             if len(daily_closes) < kline_limit:
                 continue
             trend = check_trend(daily_closes, config.BB_PERIOD)
+            _, d_middle, _ = calculate_bollinger_bands(daily_closes, config.BB_PERIOD, config.BB_STD)
 
-            # Daily BB for logging
-            d_upper, d_middle, d_lower = calculate_bollinger_bands(daily_closes, config.BB_PERIOD, config.BB_STD)
-
-            # Hourly signal
             hourly_klines = exchange.get_klines(
                 symbol, Client.KLINE_INTERVAL_1HOUR, kline_limit
             )
@@ -110,13 +105,17 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
             current_close = hourly_closes[-1]
             current_volume = hourly_volumes[-1]
             avg_volume = float(np.mean(hourly_volumes[-config.BB_PERIOD - 1 : -1]))
-
-            signal = check_entry_signal(
-                hourly_closes, hourly_volumes, trend, config.BB_PERIOD, config.BB_STD
-            )
-
-            # Log scan details
             vol_ratio = current_volume / avg_volume if avg_volume > 0 else 0
+
+            # Use pre-computed BB values to check signal directly (avoid double calculation)
+            volume_ok = current_volume > avg_volume
+            if trend == "LONG" and current_close > h_upper and volume_ok:
+                signal = True
+            elif trend == "SHORT" and current_close < h_lower and volume_ok:
+                signal = True
+            else:
+                signal = False
+
             logger.info(
                 "[扫描] %s | 趋势: %s | 日线中轨: %.4f | "
                 "1H收盘: %.4f | 上轨: %.4f | 下轨: %.4f | "
@@ -158,7 +157,7 @@ def _open_position(
     order_side = "BUY" if side == "LONG" else "SELL"
     try:
         exchange.set_leverage(symbol, config.LEVERAGE)
-        order = exchange.place_order(symbol, order_side, quantity)
+        exchange.place_order(symbol, order_side, quantity)
 
         state_mgr.add_position(
             symbol=symbol,
@@ -174,19 +173,3 @@ def _open_position(
         )
     except Exception as e:
         logger.error(f"Failed to open {side} {symbol}: {e}")
-
-
-def _sync_with_testnet(exchange: Exchange, state_mgr: StateManager):
-    """Sync local state with actual Testnet account."""
-    remote_balance = exchange.get_account_balance()
-    remote_positions = exchange.get_open_positions()
-
-    added, removed = state_mgr.sync_positions(remote_positions, remote_balance)
-
-    if added:
-        logger.info("[同步] 新增本地持仓: %s", ", ".join(added))
-    if removed:
-        logger.info("[同步] 移除本地持仓: %s", ", ".join(removed))
-
-    logger.info("[同步] Testnet 余额: $%.2f | 持仓: %d",
-                remote_balance, len(remote_positions))

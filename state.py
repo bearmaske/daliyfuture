@@ -82,15 +82,19 @@ class StateManager:
         return None
 
     def update_extreme_price(self, position_id: str, current_price: float):
+        changed = False
         with self._lock:
             for pos in self.state["positions"]:
                 if pos["id"] == position_id:
                     if current_price > pos["highest_price"]:
                         pos["highest_price"] = current_price
+                        changed = True
                     if current_price < pos["lowest_price"]:
                         pos["lowest_price"] = current_price
+                        changed = True
                     break
-        self.save()
+        if changed:
+            self.save()
 
     def add_trade_history(
         self,
