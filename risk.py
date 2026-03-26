@@ -1,3 +1,5 @@
+import numpy as np
+from binance.client import Client
 from config import config
 from exchange import Exchange
 from state import StateManager
@@ -21,8 +23,21 @@ def should_stop_loss(
         return rebound >= short_stop
 
 
+def should_close_at_middle_band(
+    side: str,
+    current_price: float,
+    bb_middle: float,
+) -> bool:
+    """Check if price has reverted to the 1H Bollinger middle band."""
+    if side == "LONG" and current_price <= bb_middle:
+        return True
+    if side == "SHORT" and current_price >= bb_middle:
+        return True
+    return False
+
+
 def check_stop_loss(exchange: Exchange, state_mgr: StateManager):
-    """Check all open positions for stop loss triggers."""
+    """Check all open positions for stop loss and middle band exit triggers."""
     positions = list(state_mgr.state.get("positions", []))
     if not positions:
         logger.debug("[止损] 无持仓，跳过检查")
@@ -53,6 +68,7 @@ def check_stop_loss(exchange: Exchange, state_mgr: StateManager):
                 extreme_label = "最低"
                 extreme_price = updated_pos["lowest_price"]
 
+            # Check trailing stop loss
             triggered = should_stop_loss(
                 side=updated_pos["side"],
                 highest_price=updated_pos["highest_price"],
@@ -62,18 +78,49 @@ def check_stop_loss(exchange: Exchange, state_mgr: StateManager):
                 short_stop=config.SHORT_TRAILING_STOP,
             )
 
+            # Check middle band exit
+            bb_middle = None
+            mid_band_exit = False
+            try:
+                kline_limit = config.BB_PERIOD + 1
+                hourly_klines = exchange.get_klines(
+                    pos["symbol"], Client.KLINE_INTERVAL_1HOUR, kline_limit
+                )
+                hourly_closes = [float(k[4]) for k in hourly_klines]
+                if len(hourly_closes) >= kline_limit:
+                    data = np.array(hourly_closes[-config.BB_PERIOD:], dtype=float)
+                    bb_middle = float(np.mean(data))
+                    mid_band_exit = should_close_at_middle_band(
+                        updated_pos["side"], current_price, bb_middle
+                    )
+            except Exception as e:
+                logger.warning("[止损] %s 获取布林中轨失败: %s", pos["symbol"], e)
+
+            # Log details
+            mid_info = ""
+            if bb_middle is not None:
+                mid_info = f" | 1H中轨: {bb_middle:.4f}"
+
+            status = "安全"
+            if triggered:
+                status = "触发止损!"
+            elif mid_band_exit:
+                status = "回归中轨平仓!"
+
             logger.info(
-                "[止损] %s %s | 入场: %.4f | %s: %.4f | 现价: %.4f | %s: %.2f%% / %.1f%% | %s",
+                "[止损] %s %s | 入场: %.4f | %s: %.4f | 现价: %.4f | %s: %.2f%% / %.1f%%%s | %s",
                 updated_pos["symbol"], updated_pos["side"],
                 updated_pos["entry_price"],
                 extreme_label, extreme_price,
                 current_price,
                 label, pct, threshold,
-                "触发止损!" if triggered else "安全"
+                mid_info, status
             )
 
             if triggered:
-                _close_position(exchange, state_mgr, updated_pos, current_price)
+                _close_position(exchange, state_mgr, updated_pos, current_price, "移动止损")
+            elif mid_band_exit:
+                _close_position(exchange, state_mgr, updated_pos, current_price, "回归中轨")
 
         except Exception as e:
             logger.error("[止损] %s 检查异常: %s", pos["symbol"], e)
@@ -84,6 +131,7 @@ def _close_position(
     state_mgr: StateManager,
     pos: dict,
     exit_price: float,
+    reason: str = "移动止损",
 ):
     """Close a position via market order."""
     close_side = "SELL" if pos["side"] == "LONG" else "BUY"
@@ -109,7 +157,7 @@ def _close_position(
         state_mgr.update_balance(config.POSITION_SIZE + pnl)
 
         notify(
-            f"平仓 {pos['side']}",
+            f"平仓 {pos['side']} ({reason})",
             f"{pos['symbol']} | 入场 {pos['entry_price']:.4f} | 出场 {exit_price:.4f} | PnL ${pnl:.2f}",
         )
     except Exception as e:

@@ -93,6 +93,34 @@ class Exchange:
             # May fail if already set, ignore
             logger.debug(f"Set leverage {symbol} {leverage}x: {e}")
 
+    def get_account_balance(self) -> float:
+        """Get available USDT balance from testnet account."""
+        account = self._retry(lambda: self.testnet_client.futures_account())
+        for asset in account.get("assets", []):
+            if asset["asset"] == "USDT":
+                return float(asset["availableBalance"])
+        return 0.0
+
+    def get_open_positions(self) -> list:
+        """Get all open positions from testnet account.
+        Returns list of dicts with symbol, side, entry_price, quantity."""
+        positions = self._retry(
+            lambda: self.testnet_client.futures_position_information()
+        )
+        open_positions = []
+        for p in positions:
+            qty = float(p["positionAmt"])
+            if qty == 0:
+                continue
+            open_positions.append({
+                "symbol": p["symbol"],
+                "side": "LONG" if qty > 0 else "SHORT",
+                "entry_price": float(p["entryPrice"]),
+                "quantity": abs(qty),
+                "unrealized_pnl": float(p.get("unRealizedProfit", 0)),
+            })
+        return open_positions
+
     def _retry(self, func, retries: int = 3, delay: int = 5):
         for i in range(retries):
             try:

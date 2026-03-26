@@ -131,6 +131,52 @@ class StateManager:
     def balance(self) -> float:
         return self.state["balance"]
 
+    def sync_positions(self, remote_positions: list, remote_balance: float):
+        """Sync local state with actual Testnet account positions and balance.
+        remote_positions: list of dicts with symbol, side, entry_price, quantity."""
+        with self._lock:
+            local_symbols = {p["symbol"]: p for p in self.state["positions"]}
+            remote_symbols = {p["symbol"]: p for p in remote_positions}
+
+            # Remove local positions that no longer exist on Testnet
+            removed = []
+            kept = []
+            for p in self.state["positions"]:
+                if p["symbol"] in remote_symbols:
+                    kept.append(p)
+                else:
+                    removed.append(p["symbol"])
+            self.state["positions"] = kept
+
+            # Add remote positions missing from local state
+            # Update existing ones with remote data
+            added = []
+            for rp in remote_positions:
+                if rp["symbol"] not in local_symbols:
+                    pos = {
+                        "id": str(uuid.uuid4()),
+                        "symbol": rp["symbol"],
+                        "side": rp["side"],
+                        "entry_price": rp["entry_price"],
+                        "quantity": rp["quantity"],
+                        "highest_price": rp["entry_price"],
+                        "lowest_price": rp["entry_price"],
+                        "opened_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                    self.state["positions"].append(pos)
+                    added.append(rp["symbol"])
+                else:
+                    # Update quantity and entry_price from remote (source of truth)
+                    local_pos = local_symbols[rp["symbol"]]
+                    local_pos["quantity"] = rp["quantity"]
+                    local_pos["entry_price"] = rp["entry_price"]
+
+            # Always use remote balance
+            self.state["balance"] = remote_balance
+
+        self.save()
+        return added, removed
+
     def _default_state(self) -> dict:
         return {
             "balance": self.initial_capital,

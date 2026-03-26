@@ -52,6 +52,12 @@ def check_entry_signal(
 
 def run_strategy(exchange: Exchange, state_mgr: StateManager):
     """Main strategy loop: scan top symbols, check signals, open positions."""
+    # Sync with Testnet before scanning
+    try:
+        _sync_with_testnet(exchange, state_mgr)
+    except Exception as e:
+        logger.warning("[策略] 同步 Testnet 失败: %s", e)
+
     if state_mgr.position_count >= config.MAX_POSITIONS:
         logger.info("Max positions reached, skipping scan")
         return
@@ -168,3 +174,19 @@ def _open_position(
         )
     except Exception as e:
         logger.error(f"Failed to open {side} {symbol}: {e}")
+
+
+def _sync_with_testnet(exchange: Exchange, state_mgr: StateManager):
+    """Sync local state with actual Testnet account."""
+    remote_balance = exchange.get_account_balance()
+    remote_positions = exchange.get_open_positions()
+
+    added, removed = state_mgr.sync_positions(remote_positions, remote_balance)
+
+    if added:
+        logger.info("[同步] 新增本地持仓: %s", ", ".join(added))
+    if removed:
+        logger.info("[同步] 移除本地持仓: %s", ", ".join(removed))
+
+    logger.info("[同步] Testnet 余额: $%.2f | 持仓: %d",
+                remote_balance, len(remote_positions))

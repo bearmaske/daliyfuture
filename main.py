@@ -5,7 +5,7 @@ from apscheduler.events import EVENT_JOB_ERROR
 from config import config
 from exchange import Exchange
 from state import StateManager
-from strategy import run_strategy
+from strategy import run_strategy, _sync_with_testnet
 from risk import check_stop_loss
 from notifier import notify, logger
 
@@ -41,6 +41,13 @@ def main():
         config.STATE_FILE, config.STATE_BACKUP_FILE, config.INITIAL_CAPITAL
     )
     state_mgr.load()
+
+    # Sync with Testnet account (source of truth)
+    logger.info("[同步] 正在从 Testnet 同步账户数据...")
+    try:
+        _sync_with_testnet(exchange, state_mgr)
+    except Exception as e:
+        logger.warning("[同步] 同步失败，使用本地数据: %s", e)
 
     logger.info("[状态] 余额: $%.2f | 当前持仓: %d",
                 state_mgr.balance, state_mgr.position_count)
@@ -82,7 +89,7 @@ def main():
         _heartbeat,
         "interval",
         hours=config.HEARTBEAT_INTERVAL_HOURS,
-        args=[state_mgr],
+        args=[exchange, state_mgr],
         id="heartbeat",
     )
 
@@ -115,14 +122,57 @@ def main():
         pass
 
 
-def _heartbeat(state_mgr: StateManager):
+def _heartbeat(exchange: Exchange, state_mgr: StateManager):
+    # Sync before reporting
+    try:
+        _sync_with_testnet(exchange, state_mgr)
+    except Exception as e:
+        logger.warning("[心跳] 同步失败: %s", e)
+
     positions = state_mgr.state.get("positions", [])
     history = state_mgr.state.get("trade_history", [])
-    total_pnl = sum(t.get("pnl", 0) for t in history)
-    notify(
-        "心跳",
-        f"余额: ${state_mgr.balance:.2f} | 持仓: {len(positions)} | 累计PnL: ${total_pnl:.2f}",
-    )
+
+    # Account summary
+    balance = state_mgr.balance
+    total_closed_pnl = sum(t.get("pnl", 0) for t in history)
+    win_count = sum(1 for t in history if t.get("pnl", 0) > 0)
+    lose_count = sum(1 for t in history if t.get("pnl", 0) <= 0)
+    win_rate = (win_count / len(history) * 100) if history else 0
+
+    lines = []
+    lines.append(f"余额: ${balance:.2f} | 持仓: {len(positions)}/{config.MAX_POSITIONS}")
+    lines.append(f"已平仓: {len(history)} 笔 | 胜率: {win_rate:.0f}% ({win_count}胜/{lose_count}负)")
+    lines.append(f"累计已实现PnL: ${total_closed_pnl:.2f}")
+
+    # Current positions with unrealized PnL
+    if positions:
+        lines.append("--- 当前持仓 ---")
+        total_unrealized = 0
+        for pos in positions:
+            try:
+                current_price = exchange.get_price(pos["symbol"])
+                if pos["side"] == "LONG":
+                    pnl = (current_price - pos["entry_price"]) / pos["entry_price"] * config.POSITION_SIZE * config.LEVERAGE
+                else:
+                    pnl = (pos["entry_price"] - current_price) / pos["entry_price"] * config.POSITION_SIZE * config.LEVERAGE
+                total_unrealized += pnl
+                sign = "+" if pnl >= 0 else ""
+                lines.append(
+                    f"{pos['symbol']} {pos['side']} | 入场: {pos['entry_price']:.4f} | "
+                    f"现价: {current_price:.4f} | {sign}${pnl:.2f}"
+                )
+            except Exception as e:
+                lines.append(f"{pos['symbol']} {pos['side']} | 获取价格失败")
+        sign = "+" if total_unrealized >= 0 else ""
+        lines.append(f"未实现PnL合计: {sign}${total_unrealized:.2f}")
+    else:
+        lines.append("当前无持仓")
+
+    # Strategy status
+    lines.append("--- 策略状态 ---")
+    lines.append("策略运行正常")
+
+    notify("策略执行汇报", "\n".join(lines))
 
 
 if __name__ == "__main__":
