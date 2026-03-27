@@ -82,12 +82,12 @@ def check_stop_loss(exchange: Exchange, state_mgr: StateManager):
             bb_middle = None
             mid_band_exit = False
             try:
-                kline_limit = config.BB_PERIOD + 1
+                kline_limit = config.BB_PERIOD + 2  # +1 to discard unclosed candle
                 hourly_klines = exchange.get_klines(
                     pos["symbol"], Client.KLINE_INTERVAL_1HOUR, kline_limit
                 )
-                hourly_closes = [float(k[4]) for k in hourly_klines]
-                if len(hourly_closes) >= kline_limit:
+                hourly_closes = [float(k[4]) for k in hourly_klines[:-1]]  # drop unclosed candle
+                if len(hourly_closes) >= config.BB_PERIOD + 1:
                     _, bb_middle, _ = calculate_bollinger_bands(
                         hourly_closes, config.BB_PERIOD, config.BB_STD
                     )
