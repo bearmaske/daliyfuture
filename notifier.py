@@ -56,12 +56,16 @@ def _send_telegram(title: str, message: str):
 def _send_bark(title: str, message: str):
     if not config.BARK_ENABLED or not config.BARK_URLS:
         return
-    encoded_title = urllib.parse.quote(title)
-    encoded_message = urllib.parse.quote(message)
+    import json as _json
     for bark_url in config.BARK_URLS:
         try:
-            url = f"{bark_url}/{encoded_title}/{encoded_message}"
-            req = urllib.request.Request(url, method="GET")
+            payload = _json.dumps({"title": title, "body": message}).encode("utf-8")
+            req = urllib.request.Request(
+                bark_url,
+                data=payload,
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
             with urllib.request.urlopen(req, timeout=10) as resp:
                 pass
         except Exception as e:
