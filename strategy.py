@@ -28,7 +28,6 @@ def check_trend(closes: List[float], period: int = 20) -> str:
 
 def check_entry_signal(
     closes: List[float],
-    volumes: List[float],
     trend: str,
     period: int = 20,
     std_dev: float = 2.0,
@@ -36,11 +35,6 @@ def check_entry_signal(
     """Check if entry signal fires on hourly data."""
     upper, middle, lower = calculate_bollinger_bands(closes, period, std_dev)
     current_close = closes[-1]
-    current_volume = volumes[-1]
-    avg_volume = float(np.mean(volumes[-period - 1 : -1]))
-
-    if current_volume <= avg_volume:
-        return False
 
     if trend == "LONG" and current_close > upper:
         return True
@@ -97,32 +91,25 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
                 symbol, Client.KLINE_INTERVAL_1HOUR, kline_limit
             )
             hourly_closes = [float(k[4]) for k in hourly_klines]
-            hourly_volumes = [float(k[5]) for k in hourly_klines]
             if len(hourly_closes) < kline_limit:
                 continue
 
             h_upper, h_middle, h_lower = calculate_bollinger_bands(hourly_closes, config.BB_PERIOD, config.BB_STD)
             current_close = hourly_closes[-1]
-            current_volume = hourly_volumes[-1]
-            avg_volume = float(np.mean(hourly_volumes[-config.BB_PERIOD - 1 : -1]))
-            vol_ratio = current_volume / avg_volume if avg_volume > 0 else 0
 
-            # Use pre-computed BB values to check signal directly (avoid double calculation)
-            volume_ok = current_volume > avg_volume
-            if trend == "LONG" and current_close > h_upper and volume_ok:
+            if trend == "LONG" and current_close > h_upper:
                 signal = True
-            elif trend == "SHORT" and current_close < h_lower and volume_ok:
+            elif trend == "SHORT" and current_close < h_lower:
                 signal = True
             else:
                 signal = False
 
             logger.info(
                 "[扫描] %s | 趋势: %s | 日线中轨: %.4f | "
-                "1H收盘: %.4f | 上轨: %.4f | 下轨: %.4f | "
-                "量比: %.2f | 信号: %s",
+                "1H收盘: %.4f | 上轨: %.4f | 下轨: %.4f | 信号: %s",
                 symbol, trend, d_middle,
                 current_close, h_upper, h_lower,
-                vol_ratio, "YES" if signal else "-"
+                "YES" if signal else "-"
             )
 
             if signal:

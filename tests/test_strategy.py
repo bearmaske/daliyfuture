@@ -25,27 +25,23 @@ def test_trend_bearish():
 
 def test_entry_signal_long():
     closes = [100.0] * 20 + [115.0]
-    volumes = [1000.0] * 20 + [2000.0]
-    signal = check_entry_signal(closes, volumes, trend="LONG", period=20, std_dev=2)
+    signal = check_entry_signal(closes, trend="LONG", period=20, std_dev=2)
     assert signal is True
 
 
-def test_entry_signal_no_volume():
-    closes = [100.0] * 20 + [115.0]
-    volumes = [1000.0] * 20 + [500.0]
-    signal = check_entry_signal(closes, volumes, trend="LONG", period=20, std_dev=2)
+def test_entry_signal_no_breakout():
+    closes = [100.0] * 20 + [100.5]
+    signal = check_entry_signal(closes, trend="LONG", period=20, std_dev=2)
     assert signal is False
 
 
 def test_entry_signal_wrong_trend():
     closes = [100.0] * 20 + [115.0]
-    volumes = [1000.0] * 20 + [2000.0]
-    signal = check_entry_signal(closes, volumes, trend="SHORT", period=20, std_dev=2)
+    signal = check_entry_signal(closes, trend="SHORT", period=20, std_dev=2)
     assert signal is False
 
 
 def test_entry_signal_short():
     closes = [100.0] * 20 + [85.0]
-    volumes = [1000.0] * 20 + [2000.0]
-    signal = check_entry_signal(closes, volumes, trend="SHORT", period=20, std_dev=2)
+    signal = check_entry_signal(closes, trend="SHORT", period=20, std_dev=2)
     assert signal is True
