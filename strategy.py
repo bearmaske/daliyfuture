@@ -96,6 +96,7 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
 
             h_upper, h_middle, h_lower = calculate_bollinger_bands(hourly_closes, config.BB_PERIOD, config.BB_STD)
             current_close = hourly_closes[-1]
+            current_price = exchange.get_price(symbol)
 
             if trend == "LONG" and current_close > h_upper:
                 signal = True
@@ -105,9 +106,9 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
                 signal = False
 
             logger.info(
-                "[扫描] %s | 趋势: %s | 日线中轨: %.4f | "
+                "[扫描] %s | 趋势: %s | 现价: %.4f | 日线中轨: %.4f | "
                 "1H收盘: %.4f | 上轨: %.4f | 下轨: %.4f | 信号: %s",
-                symbol, trend, d_middle,
+                symbol, trend, current_price, d_middle,
                 current_close, h_upper, h_lower,
                 "YES" if signal else "-"
             )
