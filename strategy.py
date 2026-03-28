@@ -134,6 +134,10 @@ def _open_position(
     current_price: float,
 ):
     """Open a new position."""
+    if state_mgr.get_position_by_symbol(symbol):
+        logger.warning("[开仓] %s 已持仓，跳过重复开仓", symbol)
+        return
+
     notional = config.POSITION_SIZE * config.LEVERAGE
     raw_qty = notional / current_price
     quantity = exchange.round_quantity(symbol, raw_qty)

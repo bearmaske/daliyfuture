@@ -57,7 +57,8 @@ def main():
         args=[exchange, state_mgr],
         id="strategy",
         max_instances=1,
-        misfire_grace_time=300,
+        misfire_grace_time=60,
+        coalesce=True,
     )
 
     scheduler.add_job(
