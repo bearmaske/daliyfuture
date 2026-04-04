@@ -22,16 +22,17 @@ class Config:
     MAX_POSITIONS: int = 10
     LEVERAGE: int = 5
 
-    # Stop Loss
-    LONG_TRAILING_STOP: float = 0.03
-    SHORT_TRAILING_STOP: float = 0.05
+    # ATR Trailing Stop
+    ATR_PERIOD: int = 14
+    ATR_MULTIPLIER: float = 2.0
+    MAX_STOP_LOSS: float = 0.06  # hard cap: 6% regardless of ATR
 
     # Bollinger Bands
     BB_PERIOD: int = 20
     BB_STD: float = 2.0
 
     # Scanning
-    TOP_SYMBOLS_COUNT: int = 30
+    TOP_SYMBOLS_COUNT: int = 50
     STABLECOIN_FILTER: list = None
 
     # Scheduling

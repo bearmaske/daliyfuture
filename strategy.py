@@ -1,5 +1,5 @@
 import numpy as np
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 from binance.client import Client
 from config import config
 from exchange import Exchange
@@ -19,11 +19,20 @@ def calculate_bollinger_bands(
     return upper, middle, lower
 
 
-def check_trend(closes: List[float], period: int = 20) -> str:
-    """Determine trend from daily closes. Returns 'LONG' or 'SHORT'."""
-    sma = float(np.mean(closes[-period:]))
+def check_trend(closes: List[float], period: int = 20) -> Optional[str]:
+    """Determine trend from daily closes using SMA direction.
+    Returns 'LONG', 'SHORT', or None (flat / insufficient data)."""
+    if len(closes) < period + 1:
+        return None
+    sma_now = float(np.mean(closes[-period:]))
+    sma_prev = float(np.mean(closes[-period - 1 : -1]))
     current_close = closes[-1]
-    return "LONG" if current_close > sma else "SHORT"
+
+    if current_close > sma_now and sma_now > sma_prev:
+        return "LONG"
+    if current_close < sma_now and sma_now < sma_prev:
+        return "SHORT"
+    return None
 
 
 def check_entry_signal(
@@ -63,7 +72,9 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
     logger.info("[策略] 开始扫描 %d 个币种 | 余额: $%.2f | 持仓: %d/%d",
                 len(top_symbols), state_mgr.balance, state_mgr.position_count, config.MAX_POSITIONS)
 
-    kline_limit = config.BB_PERIOD + 2  # +2: need +1 for BB calc, +1 to discard unclosed candle
+    # +2 for SMA slope comparison, +1 to discard unclosed candle
+    daily_kline_limit = config.BB_PERIOD + 3
+    hourly_kline_limit = config.BB_PERIOD + 2  # +1 for BB calc, +1 to discard unclosed candle
     signal_count = 0
 
     for symbol in top_symbols:
@@ -79,16 +90,18 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
 
         try:
             daily_klines = exchange.get_klines(
-                symbol, Client.KLINE_INTERVAL_1DAY, kline_limit
+                symbol, Client.KLINE_INTERVAL_1DAY, daily_kline_limit
             )
             daily_closes = [float(k[4]) for k in daily_klines[:-1]]  # drop unclosed candle
             if len(daily_closes) < config.BB_PERIOD + 1:
                 continue
             trend = check_trend(daily_closes, config.BB_PERIOD)
+            if trend is None:
+                continue
             _, d_middle, _ = calculate_bollinger_bands(daily_closes, config.BB_PERIOD, config.BB_STD)
 
             hourly_klines = exchange.get_klines(
-                symbol, Client.KLINE_INTERVAL_1HOUR, kline_limit
+                symbol, Client.KLINE_INTERVAL_1HOUR, hourly_kline_limit
             )
             hourly_closes = [float(k[4]) for k in hourly_klines[:-1]]  # drop unclosed candle
             if len(hourly_closes) < config.BB_PERIOD + 1:
@@ -115,7 +128,7 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
 
             if signal:
                 signal_count += 1
-                _open_position(exchange, state_mgr, symbol, trend, current_close)
+                _open_position(exchange, state_mgr, symbol, trend, current_price)
 
         except Exception as e:
             logger.error("[策略] %s 处理异常: %s", symbol, e)

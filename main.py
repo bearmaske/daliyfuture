@@ -17,8 +17,8 @@ def main():
 
     logger.info("[配置] 初始资金: $%.2f | 单仓: $%.2f | 最大持仓: %d",
                 config.INITIAL_CAPITAL, config.POSITION_SIZE, config.MAX_POSITIONS)
-    logger.info("[配置] 杠杆: %dx | 多单止损: %.1f%% | 空单止损: %.1f%%",
-                config.LEVERAGE, config.LONG_TRAILING_STOP * 100, config.SHORT_TRAILING_STOP * 100)
+    logger.info("[配置] 杠杆: %dx | ATR止损: %d周期 × %.1f倍 | 兜底: %.1f%%",
+                config.LEVERAGE, config.ATR_PERIOD, config.ATR_MULTIPLIER, config.MAX_STOP_LOSS * 100)
     logger.info("[配置] 布林带: SMA%d ± %.1fσ | 扫描前 %d 大成交量币种",
                 config.BB_PERIOD, config.BB_STD, config.TOP_SYMBOLS_COUNT)
 

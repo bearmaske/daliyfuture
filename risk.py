@@ -1,7 +1,8 @@
+import numpy as np
+from typing import List
 from config import config
 from exchange import Exchange
 from state import StateManager
-from strategy import calculate_bollinger_bands
 from notifier import notify, logger
 from binance.client import Client
 
@@ -14,38 +15,45 @@ def calculate_pnl(side: str, entry_price: float, exit_price: float) -> float:
         return (entry_price - exit_price) / entry_price * config.POSITION_SIZE * config.LEVERAGE
 
 
+def calculate_atr(klines: list, period: int = 14) -> float:
+    """Calculate Average True Range from klines.
+    Each kline: [open_time, open, high, low, close, volume, ...]."""
+    if len(klines) < period + 1:
+        return 0.0
+    true_ranges = []
+    for i in range(1, len(klines)):
+        high = float(klines[i][2])
+        low = float(klines[i][3])
+        prev_close = float(klines[i - 1][4])
+        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+        true_ranges.append(tr)
+    return float(np.mean(true_ranges[-period:]))
+
+
 def should_stop_loss(
     side: str,
     highest_price: float,
     lowest_price: float,
     current_price: float,
-    long_stop: float,
-    short_stop: float,
+    atr: float,
+    atr_multiplier: float,
+    max_stop_pct: float,
 ) -> bool:
-    """Check if trailing stop loss should trigger."""
+    """Check if ATR trailing stop should trigger, with a hard cap."""
     if side == "LONG":
-        drawdown = (highest_price - current_price) / highest_price
-        return drawdown >= long_stop
+        atr_stop = highest_price - atr_multiplier * atr
+        hard_stop = highest_price * (1 - max_stop_pct)
+        stop_price = max(atr_stop, hard_stop)  # use the tighter one
+        return current_price <= stop_price
     else:
-        rebound = (current_price - lowest_price) / lowest_price
-        return rebound >= short_stop
-
-
-def should_close_at_middle_band(
-    side: str,
-    current_price: float,
-    bb_middle: float,
-) -> bool:
-    """Check if price has reverted to the 1H Bollinger middle band."""
-    if side == "LONG" and current_price <= bb_middle:
-        return True
-    if side == "SHORT" and current_price >= bb_middle:
-        return True
-    return False
+        atr_stop = lowest_price + atr_multiplier * atr
+        hard_stop = lowest_price * (1 + max_stop_pct)
+        stop_price = min(atr_stop, hard_stop)  # use the tighter one
+        return current_price >= stop_price
 
 
 def check_stop_loss(exchange: Exchange, state_mgr: StateManager):
-    """Check all open positions for stop loss and middle band exit triggers."""
+    """Check all open positions for ATR trailing stop triggers."""
     positions = list(state_mgr.state.get("positions", []))
     if not positions:
         return
@@ -57,15 +65,26 @@ def check_stop_loss(exchange: Exchange, state_mgr: StateManager):
             current_price = exchange.get_price(pos["symbol"])
             state_mgr.update_extreme_price(pos["id"], current_price)
 
+            # Fetch 1H klines for ATR calculation
+            atr_kline_limit = config.ATR_PERIOD + 2
+            hourly_klines = exchange.get_klines(
+                pos["symbol"], Client.KLINE_INTERVAL_1HOUR, atr_kline_limit
+            )
+            atr = calculate_atr(hourly_klines, config.ATR_PERIOD)
+
             if pos["side"] == "LONG":
-                pct = (pos["highest_price"] - current_price) / pos["highest_price"] * 100
-                threshold = config.LONG_TRAILING_STOP * 100
+                atr_stop = pos["highest_price"] - config.ATR_MULTIPLIER * atr
+                hard_stop = pos["highest_price"] * (1 - config.MAX_STOP_LOSS)
+                stop_price = max(atr_stop, hard_stop)
+                drawdown_pct = (pos["highest_price"] - current_price) / pos["highest_price"] * 100
                 label = "回撤"
                 extreme_label = "最高"
                 extreme_price = pos["highest_price"]
             else:
-                pct = (current_price - pos["lowest_price"]) / pos["lowest_price"] * 100
-                threshold = config.SHORT_TRAILING_STOP * 100
+                atr_stop = pos["lowest_price"] + config.ATR_MULTIPLIER * atr
+                hard_stop = pos["lowest_price"] * (1 + config.MAX_STOP_LOSS)
+                stop_price = min(atr_stop, hard_stop)
+                drawdown_pct = (current_price - pos["lowest_price"]) / pos["lowest_price"] * 100
                 label = "反弹"
                 extreme_label = "最低"
                 extreme_price = pos["lowest_price"]
@@ -75,50 +94,27 @@ def check_stop_loss(exchange: Exchange, state_mgr: StateManager):
                 highest_price=pos["highest_price"],
                 lowest_price=pos["lowest_price"],
                 current_price=current_price,
-                long_stop=config.LONG_TRAILING_STOP,
-                short_stop=config.SHORT_TRAILING_STOP,
+                atr=atr,
+                atr_multiplier=config.ATR_MULTIPLIER,
+                max_stop_pct=config.MAX_STOP_LOSS,
             )
 
-            bb_middle = None
-            mid_band_exit = False
-            try:
-                kline_limit = config.BB_PERIOD + 2  # +1 to discard unclosed candle
-                hourly_klines = exchange.get_klines(
-                    pos["symbol"], Client.KLINE_INTERVAL_1HOUR, kline_limit
-                )
-                hourly_closes = [float(k[4]) for k in hourly_klines[:-1]]  # drop unclosed candle
-                if len(hourly_closes) >= config.BB_PERIOD + 1:
-                    _, bb_middle, _ = calculate_bollinger_bands(
-                        hourly_closes, config.BB_PERIOD, config.BB_STD
-                    )
-                    mid_band_exit = should_close_at_middle_band(
-                        pos["side"], current_price, bb_middle
-                    )
-            except Exception as e:
-                logger.warning("[止损] %s 获取布林中轨失败: %s", pos["symbol"], e)
-
-            mid_info = f" | 1H中轨: {bb_middle:.4f}" if bb_middle is not None else ""
-
-            status = "安全"
-            if triggered:
-                status = "触发止损!"
-            elif mid_band_exit:
-                status = "回归中轨平仓!"
+            status = "触发止损!" if triggered else "安全"
 
             logger.info(
-                "[止损] %s %s | 入场: %.4f | %s: %.4f | 现价: %.4f | %s: %.2f%% / %.1f%%%s | %s",
+                "[止损] %s %s | 入场: %.4f | %s: %.4f | 现价: %.4f | "
+                "ATR: %.4f | 止损线: %.4f | %s: %.2f%% | %s",
                 pos["symbol"], pos["side"],
                 pos["entry_price"],
                 extreme_label, extreme_price,
                 current_price,
-                label, pct, threshold,
-                mid_info, status
+                atr, stop_price,
+                label, drawdown_pct,
+                status,
             )
 
             if triggered:
-                _close_position(exchange, state_mgr, pos, current_price, "移动止损")
-            elif mid_band_exit:
-                _close_position(exchange, state_mgr, pos, current_price, "回归中轨")
+                _close_position(exchange, state_mgr, pos, current_price, "ATR移动止损")
 
         except Exception as e:
             logger.error("[止损] %s 检查异常: %s", pos["symbol"], e)
@@ -129,7 +125,7 @@ def _close_position(
     state_mgr: StateManager,
     pos: dict,
     exit_price: float,
-    reason: str = "移动止损",
+    reason: str = "ATR移动止损",
 ):
     """Close a position via market order."""
     close_side = "SELL" if pos["side"] == "LONG" else "BUY"

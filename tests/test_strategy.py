@@ -12,15 +12,39 @@ def test_bollinger_bands_calculation():
 
 
 def test_trend_bullish():
-    closes = [100.0] * 20 + [120.0]
+    # Price rising: SMA slopes up and price above SMA
+    closes = list(range(80, 102))  # 22 values, steadily rising
     trend = check_trend(closes, period=20)
     assert trend == "LONG"
 
 
 def test_trend_bearish():
-    closes = [100.0] * 20 + [80.0]
+    # Price falling: SMA slopes down and price below SMA
+    closes = list(range(120, 98, -1))  # 22 values, steadily falling
     trend = check_trend(closes, period=20)
     assert trend == "SHORT"
+
+
+def test_trend_flat_returns_none():
+    # Flat prices: SMA not sloping → None
+    closes = [100.0] * 22
+    trend = check_trend(closes, period=20)
+    assert trend is None
+
+
+def test_trend_price_above_but_sma_flat():
+    # Price above SMA but SMA not rising → None (filters choppy markets)
+    closes = [100.0] * 21 + [105.0]
+    trend = check_trend(closes, period=20)
+    # SMA_now includes the 105 bump, SMA_prev is flat 100
+    # SMA_now > SMA_prev and price > SMA_now → LONG
+    assert trend == "LONG"
+
+
+def test_trend_insufficient_data():
+    closes = [100.0] * 15
+    trend = check_trend(closes, period=20)
+    assert trend is None
 
 
 def test_entry_signal_long():
@@ -30,7 +54,8 @@ def test_entry_signal_long():
 
 
 def test_entry_signal_no_breakout():
-    closes = [100.0] * 20 + [100.5]
+    # With some variance so upper band is meaningful, price stays inside
+    closes = [100.0 + (i % 3) for i in range(20)] + [101.0]
     signal = check_entry_signal(closes, trend="LONG", period=20, std_dev=2)
     assert signal is False
 
