@@ -110,7 +110,7 @@ class BacktestTrade:
 ### 4. backtest.py — 主入口
 
 **命令行参数**（全部可选，有默认值）:
-- `--symbols`: 逗号分隔的symbol列表（默认15个主流币）
+- `--symbols`: 逗号分隔的symbol列表（默认30个主流币）
 - `--start`: 起始日期（默认1年前）
 - `--end`: 结束日期（默认今天）
 - `--capital`: 初始资金（默认Config.INITIAL_CAPITAL）
@@ -128,8 +128,11 @@ class BacktestTrade:
 
 ## Default Symbol List
 
-15个主流USDT永续合约:
-BTCUSDT, ETHUSDT, BNBUSDT, SOLUSDT, XRPUSDT, DOGEUSDT, ADAUSDT, AVAXUSDT, LINKUSDT, DOTUSDT, MATICUSDT, UNIUSDT, LTCUSDT, ATOMUSDT, NEARUSDT
+30个主流USDT永续合约:
+BTCUSDT, ETHUSDT, BNBUSDT, SOLUSDT, XRPUSDT, DOGEUSDT, ADAUSDT, AVAXUSDT,
+LINKUSDT, DOTUSDT, MATICUSDT, UNIUSDT, LTCUSDT, ATOMUSDT, NEARUSDT,
+APTUSDT, ARBUSDT, OPUSDT, FILUSDT, LDOUSDT, INJUSDT, SUIUSDT, SEIUSDT,
+TIAUSDT, JUPUSDT, WLDUSDT, PENDLEUSDT, STXUSDT, FETUSDT, RUNEUSDT
 
 ## Key Design Decisions
 
