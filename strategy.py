@@ -54,7 +54,7 @@ def check_entry_signal(
 
 
 def run_strategy(exchange: Exchange, state_mgr: StateManager):
-    """Main strategy loop: scan top symbols, check signals, open positions."""
+    """Main strategy loop: scan top symbols, collect signals, open by volume priority."""
     try:
         exchange.sync_state(state_mgr)
     except Exception as e:
@@ -68,6 +68,7 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
         return
 
     top_symbols = exchange.get_top_symbols()
+    volume_map = exchange.get_volume_map(top_symbols)
     logger.info("=" * 60)
     logger.info("[策略] 开始扫描 %d 个币种 | 余额: $%.2f | 持仓: %d/%d",
                 len(top_symbols), state_mgr.balance, state_mgr.position_count, config.MAX_POSITIONS)
@@ -75,15 +76,11 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
     # +2 for SMA slope comparison, +1 to discard unclosed candle
     daily_kline_limit = config.BB_PERIOD + 3
     hourly_kline_limit = config.BB_PERIOD + 2  # +1 for BB calc, +1 to discard unclosed candle
-    signal_count = 0
+
+    # Phase 1: scan all symbols and collect signals
+    signals = []
 
     for symbol in top_symbols:
-        if state_mgr.position_count >= config.MAX_POSITIONS:
-            logger.info("[策略] 已达最大持仓数 %d，停止扫描", config.MAX_POSITIONS)
-            break
-        if state_mgr.balance < config.POSITION_SIZE:
-            logger.info("[策略] 余额不足 $%.2f < $%.2f，停止扫描", state_mgr.balance, config.POSITION_SIZE)
-            break
         if state_mgr.get_position_by_symbol(symbol):
             logger.debug("[策略] %s 已持仓，跳过", symbol)
             continue
@@ -118,24 +115,48 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
             else:
                 signal = False
 
+            vol = volume_map.get(symbol, 0.0)
             logger.info(
                 "[扫描] %s | 趋势: %s | 现价: %.4f | 日线中轨: %.4f | "
-                "1H收盘: %.4f | 上轨: %.4f | 下轨: %.4f | 信号: %s",
+                "1H收盘: %.4f | 上轨: %.4f | 下轨: %.4f | 24h量: %.0f | 信号: %s",
                 symbol, trend, current_price, d_middle,
-                current_close, h_upper, h_lower,
+                current_close, h_upper, h_lower, vol,
                 "YES" if signal else "-"
             )
 
             if signal:
-                signal_count += 1
-                _open_position(exchange, state_mgr, symbol, trend, current_price)
+                signals.append({
+                    "symbol": symbol,
+                    "trend": trend,
+                    "price": current_price,
+                    "volume": vol,
+                })
 
         except Exception as e:
             logger.error("[策略] %s 处理异常: %s", symbol, e)
             continue
 
-    logger.info("[策略] 扫描完成 | 信号数: %d | 持仓: %d/%d | 余额: $%.2f",
-                signal_count, state_mgr.position_count, config.MAX_POSITIONS, state_mgr.balance)
+    # Phase 2: sort signals by 24h quote volume descending, then open
+    signals.sort(key=lambda s: s["volume"], reverse=True)
+    available_slots = config.MAX_POSITIONS - state_mgr.position_count
+
+    if signals:
+        logger.info("[策略] 收集到 %d 个信号，可用仓位 %d，按交易量排序开仓",
+                    len(signals), available_slots)
+
+    opened = 0
+    for sig in signals:
+        if opened >= available_slots:
+            logger.info("[策略] 已用完可用仓位，剩余 %d 个信号未开仓", len(signals) - opened)
+            break
+        if state_mgr.balance < config.POSITION_SIZE:
+            logger.info("[策略] 余额不足 $%.2f < $%.2f，停止开仓", state_mgr.balance, config.POSITION_SIZE)
+            break
+        _open_position(exchange, state_mgr, sig["symbol"], sig["trend"], sig["price"])
+        opened += 1
+
+    logger.info("[策略] 扫描完成 | 信号数: %d | 开仓: %d | 持仓: %d/%d | 余额: $%.2f",
+                len(signals), opened, state_mgr.position_count, config.MAX_POSITIONS, state_mgr.balance)
     logger.info("=" * 60)
 
 

@@ -39,6 +39,16 @@ class Exchange:
         usdt_tickers.sort(key=lambda x: float(x["quoteVolume"]), reverse=True)
         return [t["symbol"] for t in usdt_tickers[:limit]]
 
+    def get_volume_map(self, symbols: List[str]) -> dict:
+        """Get 24h quote volume for given symbols. Returns {symbol: quoteVolume}."""
+        tickers = self._retry(lambda: self.data_client.futures_ticker())
+        symbol_set = set(symbols)
+        return {
+            t["symbol"]: float(t["quoteVolume"])
+            for t in tickers
+            if t["symbol"] in symbol_set
+        }
+
     def get_klines(self, symbol: str, interval: str, limit: int) -> list:
         """Get klines from mainnet. Returns list of [open_time, open, high, low, close, volume, ...]."""
         return self._retry(
