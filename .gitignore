@@ -5,3 +5,7 @@ binance_paper_trading.log
 __pycache__/
 *.pyc
 .venv/
+
+# Backtesting data and results
+data/
+results/
