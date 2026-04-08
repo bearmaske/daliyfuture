@@ -11,7 +11,7 @@ import pandas as pd
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from config import config
-from strategy import calculate_bollinger_bands, check_trend
+from strategy import calculate_bollinger_bands, check_trend, check_trend_bb_middle, check_volatility_expanding
 from risk import calculate_atr, should_stop_loss
 
 TZ_CN = timezone(timedelta(hours=8))
@@ -75,6 +75,7 @@ class BacktestEngine:
         max_positions: int = 10,
         bb_period: int = 20,
         bb_std: float = 2.0,
+        sma_period: int = 20,
         atr_period: int = 14,
         atr_multiplier: float = 2.0,
         max_stop_pct: float = 0.06,
@@ -86,6 +87,7 @@ class BacktestEngine:
         self.max_positions = max_positions
         self.bb_period = bb_period
         self.bb_std = bb_std
+        self.sma_period = sma_period
         self.atr_period = atr_period
         self.atr_multiplier = atr_multiplier
         self.max_stop_pct = max_stop_pct
@@ -112,7 +114,7 @@ class BacktestEngine:
         timeline = sorted(all_timestamps)
 
         min_hourly_bars = self.bb_period + 1
-        min_daily_bars = self.bb_period + 1
+        min_daily_bars = self.sma_period + 1
 
         for ts in timeline:
             # 1. Check stop loss for all open positions
@@ -164,21 +166,34 @@ class BacktestEngine:
         daily_closes = d_closed["close"].tolist()
         hourly_closes = h_closed["close"].tolist()
 
-        # 1. Check daily trend (SMA slope) if enabled
+        # 1. Check daily trend if enabled
         trend = None
-        if config.TREND_FILTER_ENABLED:
-            trend = check_trend(daily_closes, self.bb_period)
+        mode = config.TREND_FILTER_MODE
+        if mode != "disabled":
+            if mode == "sma":
+                trend = check_trend(daily_closes, self.sma_period)
+            elif mode == "bb_middle":
+                trend = check_trend_bb_middle(daily_closes, self.sma_period, self.bb_std)
             if trend is None:
                 return
 
-        # 2. Check hourly Bollinger Band breakout
+        # 2. Check volatility filter (ATR expansion)
+        if config.VOL_FILTER_ENABLED:
+            h_arr = h_closed[["open_time", "open", "high", "low", "close", "volume"]].values
+            expanding, _, _, _ = check_volatility_expanding(
+                h_arr, config.VOL_ATR_SHORT, config.VOL_ATR_LONG, config.VOL_ATR_THRESHOLD
+            )
+            if not expanding:
+                return
+
+        # 3. Check hourly Bollinger Band breakout
         upper, middle, lower = calculate_bollinger_bands(
             hourly_closes, self.bb_period, self.bb_std
         )
         last_close = hourly_closes[-1]
 
         signal = False
-        if config.TREND_FILTER_ENABLED:
+        if mode != "disabled":
             if trend == "LONG" and last_close > upper:
                 signal = True
             elif trend == "SHORT" and last_close < lower:

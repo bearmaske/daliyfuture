@@ -27,8 +27,15 @@ class Config:
     ATR_MULTIPLIER: float = 2.0
     MAX_STOP_LOSS: float = 0.06  # hard cap: 6% regardless of ATR
 
-    # Trend Filter
-    TREND_FILTER_ENABLED: bool = True  # False = skip daily SMA trend check, enter on BB breakout alone
+    # Trend Filter: "sma" = SMA slope, "bb_middle" = price vs daily BB middle, "disabled" = no filter
+    TREND_FILTER_MODE: str = "sma"
+    SMA_PERIOD: int = 20  # SMA period for daily trend check (independent of BB_PERIOD)
+
+    # Volatility Filter: skip entry when ATR is contracting (low-vol regime)
+    VOL_FILTER_ENABLED: bool = True
+    VOL_ATR_SHORT: int = 7    # short-term ATR window (recent volatility)
+    VOL_ATR_LONG: int = 28    # long-term ATR window (baseline volatility)
+    VOL_ATR_THRESHOLD: float = 1.2  # short/long ratio must be >= this to allow entry
 
     # Bollinger Bands
     BB_PERIOD: int = 20

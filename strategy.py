@@ -35,6 +35,40 @@ def check_trend(closes: List[float], period: int = 20) -> Optional[str]:
     return None
 
 
+def check_trend_bb_middle(closes: List[float], period: int = 20, std_dev: float = 2.0) -> Optional[str]:
+    """Determine trend by price position relative to daily BB middle.
+    Returns 'LONG' if price > middle, 'SHORT' if price < middle, None if insufficient data."""
+    if len(closes) < period:
+        return None
+    _, middle, _ = calculate_bollinger_bands(closes, period, std_dev)
+    current_close = closes[-1]
+    if current_close > middle:
+        return "LONG"
+    if current_close < middle:
+        return "SHORT"
+    return None
+
+
+def check_volatility_expanding(klines, short_period: int = 7, long_period: int = 28, threshold: float = 1.0) -> tuple:
+    """Check if volatility is expanding by comparing short vs long ATR.
+    Returns (is_expanding, short_atr, long_atr, ratio).
+    klines: list/array of [open_time, open, high, low, close, volume, ...] or ndarray."""
+    arr = np.asarray(klines, dtype=float) if not isinstance(klines, np.ndarray) else klines
+    min_bars = long_period + 1
+    if len(arr) < min_bars:
+        return True, 0.0, 0.0, 0.0  # not enough data, allow entry
+
+    highs = arr[1:, 2]
+    lows = arr[1:, 3]
+    prev_closes = arr[:-1, 4]
+    tr = np.maximum(highs - lows, np.maximum(np.abs(highs - prev_closes), np.abs(lows - prev_closes)))
+
+    short_atr = float(np.mean(tr[-short_period:]))
+    long_atr = float(np.mean(tr[-long_period:]))
+    ratio = short_atr / long_atr if long_atr > 0 else 0.0
+    return ratio >= threshold, short_atr, long_atr, ratio
+
+
 def check_entry_signal(
     closes: List[float],
     trend: str,
@@ -74,8 +108,10 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
                 len(top_symbols), state_mgr.balance, state_mgr.position_count, config.MAX_POSITIONS)
 
     # +2 for SMA slope comparison, +1 to discard unclosed candle
-    daily_kline_limit = config.BB_PERIOD + 3
-    hourly_kline_limit = config.BB_PERIOD + 2  # +1 for BB calc, +1 to discard unclosed candle
+    daily_kline_limit = config.SMA_PERIOD + 3
+    # Need enough bars for both BB and volatility filter ATR
+    hourly_bars_needed = max(config.BB_PERIOD, config.VOL_ATR_LONG + 1) if config.VOL_FILTER_ENABLED else config.BB_PERIOD
+    hourly_kline_limit = hourly_bars_needed + 2  # +1 for calc, +1 to discard unclosed candle
 
     # Phase 1: scan all symbols and collect signals
     signals = []
@@ -88,20 +124,24 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
         try:
             trend = None
             d_middle = 0.0
+            mode = config.TREND_FILTER_MODE
 
-            if config.TREND_FILTER_ENABLED:
+            if mode != "disabled":
                 daily_klines = exchange.get_klines(
                     symbol, Client.KLINE_INTERVAL_1DAY, daily_kline_limit
                 )
                 daily_closes = [float(k[4]) for k in daily_klines[:-1]]  # drop unclosed candle
-                if len(daily_closes) < config.BB_PERIOD + 1:
-                    logger.info("[跳过] %s | 原因: 日线数据不足 (%d/%d)", symbol, len(daily_closes), config.BB_PERIOD + 1)
+                if len(daily_closes) < config.SMA_PERIOD + 1:
+                    logger.info("[跳过] %s | 原因: 日线数据不足 (%d/%d)", symbol, len(daily_closes), config.SMA_PERIOD + 1)
                     continue
-                trend = check_trend(daily_closes, config.BB_PERIOD)
+                if mode == "sma":
+                    trend = check_trend(daily_closes, config.SMA_PERIOD)
+                elif mode == "bb_middle":
+                    trend = check_trend_bb_middle(daily_closes, config.SMA_PERIOD, config.BB_STD)
                 if trend is None:
-                    logger.info("[跳过] %s | 原因: 无明确趋势(SMA走平或方向矛盾)", symbol)
+                    logger.info("[跳过] %s | 原因: 无明确趋势", symbol)
                     continue
-                _, d_middle, _ = calculate_bollinger_bands(daily_closes, config.BB_PERIOD, config.BB_STD)
+                _, d_middle, _ = calculate_bollinger_bands(daily_closes, config.SMA_PERIOD, config.BB_STD)
 
             hourly_klines = exchange.get_klines(
                 symbol, Client.KLINE_INTERVAL_1HOUR, hourly_kline_limit
@@ -111,11 +151,21 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
                 logger.info("[跳过] %s | 原因: 小时线数据不足 (%d/%d)", symbol, len(hourly_closes), config.BB_PERIOD + 1)
                 continue
 
+            if config.VOL_FILTER_ENABLED:
+                closed_klines = hourly_klines[:-1]  # drop unclosed candle
+                expanding, s_atr, l_atr, ratio = check_volatility_expanding(
+                    closed_klines, config.VOL_ATR_SHORT, config.VOL_ATR_LONG, config.VOL_ATR_THRESHOLD
+                )
+                if not expanding:
+                    logger.info("[跳过] %s | 原因: 波动率收缩 (ATR%d/ATR%d=%.2f < %.1f)",
+                                symbol, config.VOL_ATR_SHORT, config.VOL_ATR_LONG, ratio, config.VOL_ATR_THRESHOLD)
+                    continue
+
             h_upper, h_middle, h_lower = calculate_bollinger_bands(hourly_closes, config.BB_PERIOD, config.BB_STD)
             current_close = hourly_closes[-1]
             current_price = exchange.get_price(symbol)
 
-            if config.TREND_FILTER_ENABLED:
+            if mode != "disabled":
                 if trend == "LONG" and current_close > h_upper:
                     signal = True
                 elif trend == "SHORT" and current_close < h_lower:
@@ -123,7 +173,6 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
                 else:
                     signal = False
             else:
-                # No trend filter: breakout direction determines side
                 if current_close > h_upper:
                     signal = True
                     trend = "LONG"
