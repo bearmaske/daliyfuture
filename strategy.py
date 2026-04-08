@@ -82,7 +82,7 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
 
     for symbol in top_symbols:
         if state_mgr.get_position_by_symbol(symbol):
-            logger.debug("[策略] %s 已持仓，跳过", symbol)
+            logger.info("[跳过] %s | 原因: 已持仓", symbol)
             continue
 
         try:
@@ -91,9 +91,11 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
             )
             daily_closes = [float(k[4]) for k in daily_klines[:-1]]  # drop unclosed candle
             if len(daily_closes) < config.BB_PERIOD + 1:
+                logger.info("[跳过] %s | 原因: 日线数据不足 (%d/%d)", symbol, len(daily_closes), config.BB_PERIOD + 1)
                 continue
             trend = check_trend(daily_closes, config.BB_PERIOD)
             if trend is None:
+                logger.info("[跳过] %s | 原因: 无明确趋势(SMA走平或方向矛盾)", symbol)
                 continue
             _, d_middle, _ = calculate_bollinger_bands(daily_closes, config.BB_PERIOD, config.BB_STD)
 
@@ -102,6 +104,7 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
             )
             hourly_closes = [float(k[4]) for k in hourly_klines[:-1]]  # drop unclosed candle
             if len(hourly_closes) < config.BB_PERIOD + 1:
+                logger.info("[跳过] %s | 原因: 小时线数据不足 (%d/%d)", symbol, len(hourly_closes), config.BB_PERIOD + 1)
                 continue
 
             h_upper, h_middle, h_lower = calculate_bollinger_bands(hourly_closes, config.BB_PERIOD, config.BB_STD)
