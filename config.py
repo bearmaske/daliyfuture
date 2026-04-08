@@ -53,7 +53,6 @@ class Config:
     # Files
     STATE_FILE: str = "state.json"
     STATE_BACKUP_FILE: str = "state.backup.json"
-    LOG_FILE: str = "binance_paper_trading.log"
 
     def __post_init__(self):
         if self.STABLECOIN_FILTER is None:

@@ -1,24 +1,59 @@
 import logging
+import logging.handlers
+import os
 import urllib.request
 import urllib.parse
+from datetime import datetime, timezone, timedelta
 from config import config
+
+TZ_CN = timezone(timedelta(hours=8))
 
 # Setup logging
 logger = logging.getLogger("dabao")
 logger.setLevel(logging.INFO)
 
+_LOG_FORMAT = logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+
 # Console handler
 console_handler = logging.StreamHandler()
-console_handler.setFormatter(
-    logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
-)
+console_handler.setFormatter(_LOG_FORMAT)
 logger.addHandler(console_handler)
 
-# File handler
-file_handler = logging.FileHandler(config.LOG_FILE)
-file_handler.setFormatter(
-    logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
-)
+# Daily rotating file handler → logs/dabao_2026-04-08.log
+LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+
+
+class DailyFileHandler(logging.Handler):
+    """Creates a new log file per day (UTC+8), e.g. logs/dabao_2026-04-08.log."""
+
+    def __init__(self, log_dir: str):
+        super().__init__()
+        self.log_dir = log_dir
+        self._current_date = None
+        self._handler = None
+
+    def _get_handler(self):
+        today = datetime.now(TZ_CN).strftime("%Y-%m-%d")
+        if today != self._current_date:
+            if self._handler:
+                self._handler.close()
+            self._current_date = today
+            path = os.path.join(self.log_dir, f"dabao_{today}.log")
+            self._handler = logging.FileHandler(path, encoding="utf-8")
+            self._handler.setFormatter(_LOG_FORMAT)
+        return self._handler
+
+    def emit(self, record):
+        self._get_handler().emit(record)
+
+    def close(self):
+        if self._handler:
+            self._handler.close()
+        super().close()
+
+
+file_handler = DailyFileHandler(LOG_DIR)
 logger.addHandler(file_handler)
 
 

@@ -2,6 +2,7 @@
 state.json
 state.backup.json
 binance_paper_trading.log
+logs/
 __pycache__/
 *.pyc
 .venv/
