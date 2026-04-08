@@ -27,6 +27,9 @@ class Config:
     ATR_MULTIPLIER: float = 2.0
     MAX_STOP_LOSS: float = 0.06  # hard cap: 6% regardless of ATR
 
+    # Trend Filter
+    TREND_FILTER_ENABLED: bool = True  # False = skip daily SMA trend check, enter on BB breakout alone
+
     # Bollinger Bands
     BB_PERIOD: int = 20
     BB_STD: float = 2.0

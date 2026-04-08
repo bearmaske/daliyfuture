@@ -86,18 +86,22 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
             continue
 
         try:
-            daily_klines = exchange.get_klines(
-                symbol, Client.KLINE_INTERVAL_1DAY, daily_kline_limit
-            )
-            daily_closes = [float(k[4]) for k in daily_klines[:-1]]  # drop unclosed candle
-            if len(daily_closes) < config.BB_PERIOD + 1:
-                logger.info("[跳过] %s | 原因: 日线数据不足 (%d/%d)", symbol, len(daily_closes), config.BB_PERIOD + 1)
-                continue
-            trend = check_trend(daily_closes, config.BB_PERIOD)
-            if trend is None:
-                logger.info("[跳过] %s | 原因: 无明确趋势(SMA走平或方向矛盾)", symbol)
-                continue
-            _, d_middle, _ = calculate_bollinger_bands(daily_closes, config.BB_PERIOD, config.BB_STD)
+            trend = None
+            d_middle = 0.0
+
+            if config.TREND_FILTER_ENABLED:
+                daily_klines = exchange.get_klines(
+                    symbol, Client.KLINE_INTERVAL_1DAY, daily_kline_limit
+                )
+                daily_closes = [float(k[4]) for k in daily_klines[:-1]]  # drop unclosed candle
+                if len(daily_closes) < config.BB_PERIOD + 1:
+                    logger.info("[跳过] %s | 原因: 日线数据不足 (%d/%d)", symbol, len(daily_closes), config.BB_PERIOD + 1)
+                    continue
+                trend = check_trend(daily_closes, config.BB_PERIOD)
+                if trend is None:
+                    logger.info("[跳过] %s | 原因: 无明确趋势(SMA走平或方向矛盾)", symbol)
+                    continue
+                _, d_middle, _ = calculate_bollinger_bands(daily_closes, config.BB_PERIOD, config.BB_STD)
 
             hourly_klines = exchange.get_klines(
                 symbol, Client.KLINE_INTERVAL_1HOUR, hourly_kline_limit
@@ -111,18 +115,29 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
             current_close = hourly_closes[-1]
             current_price = exchange.get_price(symbol)
 
-            if trend == "LONG" and current_close > h_upper:
-                signal = True
-            elif trend == "SHORT" and current_close < h_lower:
-                signal = True
+            if config.TREND_FILTER_ENABLED:
+                if trend == "LONG" and current_close > h_upper:
+                    signal = True
+                elif trend == "SHORT" and current_close < h_lower:
+                    signal = True
+                else:
+                    signal = False
             else:
-                signal = False
+                # No trend filter: breakout direction determines side
+                if current_close > h_upper:
+                    signal = True
+                    trend = "LONG"
+                elif current_close < h_lower:
+                    signal = True
+                    trend = "SHORT"
+                else:
+                    signal = False
 
             vol = volume_map.get(symbol, 0.0)
             logger.info(
                 "[扫描] %s | 趋势: %s | 现价: %.4f | 日线中轨: %.4f | "
                 "1H收盘: %.4f | 上轨: %.4f | 下轨: %.4f | 24h量: %.0f | 信号: %s",
-                symbol, trend, current_price, d_middle,
+                symbol, trend or "-", current_price, d_middle,
                 current_close, h_upper, h_lower, vol,
                 "YES" if signal else "-"
             )

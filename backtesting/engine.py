@@ -10,6 +10,7 @@ import pandas as pd
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from config import config
 from strategy import calculate_bollinger_bands, check_trend
 from risk import calculate_atr, should_stop_loss
 
@@ -163,10 +164,12 @@ class BacktestEngine:
         daily_closes = d_closed["close"].tolist()
         hourly_closes = h_closed["close"].tolist()
 
-        # 1. Check daily trend (SMA slope)
-        trend = check_trend(daily_closes, self.bb_period)
-        if trend is None:
-            return
+        # 1. Check daily trend (SMA slope) if enabled
+        trend = None
+        if config.TREND_FILTER_ENABLED:
+            trend = check_trend(daily_closes, self.bb_period)
+            if trend is None:
+                return
 
         # 2. Check hourly Bollinger Band breakout
         upper, middle, lower = calculate_bollinger_bands(
@@ -175,10 +178,18 @@ class BacktestEngine:
         last_close = hourly_closes[-1]
 
         signal = False
-        if trend == "LONG" and last_close > upper:
-            signal = True
-        elif trend == "SHORT" and last_close < lower:
-            signal = True
+        if config.TREND_FILTER_ENABLED:
+            if trend == "LONG" and last_close > upper:
+                signal = True
+            elif trend == "SHORT" and last_close < lower:
+                signal = True
+        else:
+            if last_close > upper:
+                signal = True
+                trend = "LONG"
+            elif last_close < lower:
+                signal = True
+                trend = "SHORT"
 
         if not signal:
             return
