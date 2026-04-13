@@ -56,7 +56,7 @@ def check_volatility_expanding(klines, short_period: int = 7, long_period: int =
     arr = np.asarray(klines, dtype=float) if not isinstance(klines, np.ndarray) else klines
     min_bars = long_period + 1
     if len(arr) < min_bars:
-        return True, 0.0, 0.0, 0.0  # not enough data, allow entry
+        return False, 0.0, 0.0, 0.0  # not enough data, skip entry
 
     highs = arr[1:, 2]
     lows = arr[1:, 3]
