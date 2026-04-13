@@ -98,7 +98,7 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
     try:
         exchange.sync_state(state_mgr)
     except Exception as e:
-        logger.warning("[策略] 同步 Testnet 失败: %s", e)
+        logger.warning("[策略] 同步账户失败: %s", e)
 
     if state_mgr.position_count >= config.MAX_POSITIONS:
         logger.info("Max positions reached, skipping scan")
@@ -256,19 +256,30 @@ def _open_position(
     order_side = "BUY" if side == "LONG" else "SELL"
     try:
         exchange.set_leverage(symbol, config.LEVERAGE)
-        exchange.place_order(symbol, order_side, quantity)
+        order = exchange.place_order(symbol, order_side, quantity)
+
+        # Get actual commission from trade fills
+        commission = 0.0
+        order_id = order.get("orderId")
+        if order_id:
+            try:
+                commission = exchange.get_order_commission(symbol, order_id)
+            except Exception as e:
+                logger.warning("[开仓] %s 获取手续费失败: %s", symbol, e)
 
         state_mgr.add_position(
             symbol=symbol,
             side=side,
             entry_price=current_price,
             quantity=quantity,
+            open_commission=commission,
         )
         state_mgr.update_balance(-config.POSITION_SIZE)
 
         notify(
             f"开仓 {side}",
-            f"{symbol} | 价格 {current_price:.4f} | 数量 {quantity} | 保证金 ${config.POSITION_SIZE}",
+            f"{symbol} | 价格 {current_price:.4f} | 数量 {quantity} | "
+            f"保证金 ${config.POSITION_SIZE} | 手续费 ${commission:.4f}",
         )
     except Exception as e:
         logger.error(f"Failed to open {side} {symbol}: {e}")

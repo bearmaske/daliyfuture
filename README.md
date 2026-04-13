@@ -1,6 +1,6 @@
-# Trend Sniper — Binance Testnet 模拟盘交易 Bot
+# Trend Sniper — Binance 加密货币合约交易 Bot
 
-基于双时间框架布林带的加密货币 USDT 永续合约动量策略，运行在 Binance Testnet（测试网）上。
+基于双时间框架布林带的加密货币 USDT 永续合约动量策略。支持模拟盘（Testnet）和实盘（Mainnet）两种模式，通过环境变量一键切换。
 
 ## 策略简介
 
@@ -42,12 +42,19 @@
 - 冷静期到期后自动恢复正常交易
 - 通过 `MAX_DRAWDOWN_PCT` 和 `COOLDOWN_HOURS` 配置
 
+### 手续费
+
+- 开仓和平仓时从 Binance 订单成交记录中提取**平台实际收取的手续费**
+- 自动处理 USDT 和 BNB 抵扣两种手续费类型
+- PnL 计算已扣除开仓+平仓双边手续费，显示的是净盈亏
+- 策略汇报中统计累计手续费支出
+
 ### 数据处理
 
-- **行情数据**从 Binance 主网获取（数据质量更好）
-- **下单执行**通过 Testnet 进行（不涉及真实资金）
+- **行情数据**始终从 Binance 主网获取（数据质量更好）
+- **下单执行**根据 `TRADING_MODE` 走 Testnet 或主网
 - K 线计算时丢弃最后一根未闭合的蜡烛，避免用不完整数据做决策
-- 启动时和每次策略扫描前，自动从 Testnet 同步账户数据（余额 + 持仓）
+- 启动时和每次策略扫描前，自动同步账户数据（余额 + 持仓）
 
 ## 快速开始
 
@@ -69,10 +76,17 @@ cp .env.example .env
 编辑 `.env`，填入你的密钥：
 
 ```bash
-# 必填 — Binance Testnet API 密钥
+# 交易模式: "paper"(模拟盘) 或 "live"(实盘)
+TRADING_MODE=paper
+
+# Binance Testnet API（模拟盘）
 # 申请地址：https://testnet.binancefuture.com
 BINANCE_TESTNET_API_KEY=你的key
 BINANCE_TESTNET_API_SECRET=你的secret
+
+# Binance 主网 API（实盘 — 只开合约交易权限，不要开提币权限）
+BINANCE_LIVE_API_KEY=你的key
+BINANCE_LIVE_API_SECRET=你的secret
 
 # 可选 — Telegram 通知
 TELEGRAM_ENABLED=false
@@ -84,6 +98,7 @@ BARK_ENABLED=false
 BARK_URLS=https://api.day.app/key1,https://api.day.app/key2
 ```
 
+> **默认模拟盘模式。** 切换实盘：将 `TRADING_MODE` 改为 `live` 并填入主网 API 密钥。
 > **Telegram 和 Bark 默认关闭。** 需要哪个就把对应的 `_ENABLED` 改为 `true` 并填入密钥。
 
 ### 3. 启动 Bot
@@ -116,11 +131,11 @@ python -m pytest tests/ -v
 dabao/
 ├── main.py          # 入口，APScheduler 调度 + 策略执行汇报
 ├── config.py        # 参数配置 + 环境变量加载
-├── exchange.py      # Binance API 封装（主网行情 + 测试网下单 + 账户同步）
+├── exchange.py      # Binance API 封装（主网行情 + 模拟/实盘下单 + 手续费提取）
 ├── strategy.py      # 布林带策略（SMA 斜率趋势判断 + 突破入场信号）
 ├── risk.py          # ATR 动态移动止损 + 全局熔断强平
 ├── notifier.py      # 日志 + Telegram + Bark 通知
-├── state.py         # JSON 状态持久化 + Testnet 同步
+├── state.py         # JSON 状态持久化 + 账户同步
 ├── tests/           # 单元测试
 ├── .env.example     # 环境变量模板
 ├── requirements.txt # Python 依赖
@@ -133,6 +148,7 @@ dabao/
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
+| `TRADING_MODE` | "paper" | 交易模式：`paper`（模拟盘）/ `live`（实盘） |
 | `INITIAL_CAPITAL` | 10000 | 初始资金（USDT） |
 | `POSITION_SIZE` | 500 | 单仓保证金（USDT） |
 | `MAX_POSITIONS` | 10 | 最大同时持仓数 |
@@ -163,10 +179,10 @@ dabao/
 钱包余额: $10400.00 | 可用余额: $9400.00
 持仓未实现PnL: +$138.26
 初始资金: $10000.00
---- 交易统计 ---
+--- 交易统计 (实盘) ---
 持仓: 2/10
 已平仓: 3 笔 | 胜率: 67% (2胜/1负)
-累计已实现PnL: +$400.00
+累计已实现PnL: +$400.00 | 累计手续费: $2.4000
 --- 当前持仓 ---
 DOTUSDT SHORT | 入场: 1.3890 | 现价: 1.3740 | +$54.00 (+10.8%)
 BTCUSDT LONG | 入场: 70000.0000 | 现价: 70500.0000 | +$17.86 (+3.6%)
@@ -183,7 +199,8 @@ BTCUSDT LONG | 入场: 70000.0000 | 现价: 70500.0000 | +$17.86 (+3.6%)
 
 ## 注意事项
 
-- 这是**模拟盘**，不涉及真实资金
+- **默认模拟盘**，不涉及真实资金。切换实盘请确认已充分了解策略风险
+- 实盘 API Key 建议：**只开合约交易权限，不开提币权限，绑定 IP 白名单**
 - Binance Testnet API Key 需要在 [testnet.binancefuture.com](https://testnet.binancefuture.com) 单独申请
 - Testnet 的撮合引擎和主网独立，订单簿可能较薄
-- 建议用 `screen` 或 `tmux` 在后台运行 Bot
+- 建议用 `tmux` 在后台运行 Bot

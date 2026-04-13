@@ -7,9 +7,14 @@ load_dotenv()
 
 @dataclass
 class Config:
+    # Trading Mode: "paper" (testnet) or "live" (mainnet)
+    TRADING_MODE: str = os.getenv("TRADING_MODE", "paper")
+
     # API Keys
     BINANCE_TESTNET_API_KEY: str = os.getenv("BINANCE_TESTNET_API_KEY", "")
     BINANCE_TESTNET_API_SECRET: str = os.getenv("BINANCE_TESTNET_API_SECRET", "")
+    BINANCE_LIVE_API_KEY: str = os.getenv("BINANCE_LIVE_API_KEY", "")
+    BINANCE_LIVE_API_SECRET: str = os.getenv("BINANCE_LIVE_API_SECRET", "")
     TELEGRAM_ENABLED: bool = os.getenv("TELEGRAM_ENABLED", "false").lower() == "true"
     TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
     TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
@@ -67,6 +72,10 @@ class Config:
         if self.BARK_URLS is None:
             raw = os.getenv("BARK_URLS", "")
             self.BARK_URLS = [u.strip() for u in raw.split(",") if u.strip()]
+
+    @property
+    def is_live(self) -> bool:
+        return self.TRADING_MODE.lower() == "live"
 
 
 config = Config()

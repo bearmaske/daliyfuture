@@ -181,9 +181,22 @@ def _close_position(
     close_side = "SELL" if pos["side"] == "LONG" else "BUY"
 
     try:
-        exchange.place_order(pos["symbol"], close_side, pos["quantity"])
+        order = exchange.place_order(pos["symbol"], close_side, pos["quantity"])
 
-        pnl = calculate_pnl(pos["side"], pos["entry_price"], exit_price)
+        # Get close commission from trade fills
+        close_commission = 0.0
+        order_id = order.get("orderId")
+        if order_id:
+            try:
+                close_commission = exchange.get_order_commission(pos["symbol"], order_id)
+            except Exception as e:
+                logger.warning("[平仓] %s 获取手续费失败: %s", pos["symbol"], e)
+
+        open_commission = pos.get("open_commission", 0.0)
+        total_commission = open_commission + close_commission
+
+        raw_pnl = calculate_pnl(pos["side"], pos["entry_price"], exit_price)
+        net_pnl = raw_pnl - total_commission
 
         state_mgr.remove_position(pos["id"])
         state_mgr.add_trade_history(
@@ -192,14 +205,16 @@ def _close_position(
             entry_price=pos["entry_price"],
             exit_price=exit_price,
             quantity=pos["quantity"],
-            pnl=pnl,
+            pnl=net_pnl,
+            commission=total_commission,
             opened_at=pos["opened_at"],
         )
-        state_mgr.update_balance(config.POSITION_SIZE + pnl)
+        state_mgr.update_balance(config.POSITION_SIZE + net_pnl)
 
         notify(
             f"平仓 {pos['side']} ({reason})",
-            f"{pos['symbol']} | 入场 {pos['entry_price']:.4f} | 出场 {exit_price:.4f} | PnL ${pnl:.2f}",
+            f"{pos['symbol']} | 入场 {pos['entry_price']:.4f} | 出场 {exit_price:.4f} | "
+            f"PnL ${net_pnl:.2f} (手续费 ${total_commission:.4f})",
         )
     except Exception as e:
         logger.error(f"Failed to close {pos['symbol']}: {e}")

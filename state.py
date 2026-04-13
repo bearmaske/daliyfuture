@@ -46,7 +46,8 @@ class StateManager:
                 json.dump(self.state, f, indent=2, default=str)
 
     def add_position(
-        self, symbol: str, side: str, entry_price: float, quantity: float
+        self, symbol: str, side: str, entry_price: float, quantity: float,
+        open_commission: float = 0.0,
     ) -> dict:
         with self._lock:
             pos = {
@@ -57,6 +58,7 @@ class StateManager:
                 "quantity": quantity,
                 "highest_price": entry_price,
                 "lowest_price": entry_price,
+                "open_commission": open_commission,
                 "opened_at": now_cn(),
             }
             self.state["positions"].append(pos)
@@ -111,6 +113,7 @@ class StateManager:
         exit_price: float,
         quantity: float,
         pnl: float,
+        commission: float,
         opened_at: str,
     ):
         with self._lock:
@@ -122,6 +125,7 @@ class StateManager:
                 "exit_price": exit_price,
                 "quantity": quantity,
                 "pnl": pnl,
+                "commission": commission,
                 "opened_at": opened_at,
                 "closed_at": now_cn(),
             }

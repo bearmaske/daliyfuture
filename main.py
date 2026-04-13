@@ -12,9 +12,11 @@ from notifier import notify, logger
 
 def main():
     logger.info("=" * 60)
-    logger.info("Starting DualTrend Bollinger Strategy Bot")
+    mode_label = "实盘 LIVE" if config.is_live else "模拟盘 PAPER"
+    logger.info("Starting DualTrend Bollinger Strategy Bot [%s]", mode_label)
     logger.info("=" * 60)
 
+    logger.info("[配置] 交易模式: %s", mode_label)
     logger.info("[配置] 初始资金: $%.2f | 单仓: $%.2f | 最大持仓: %d",
                 config.INITIAL_CAPITAL, config.POSITION_SIZE, config.MAX_POSITIONS)
     logger.info("[配置] 杠杆: %dx | ATR止损: %d周期 × %.1f倍 | 兜底: %.1f%%",
@@ -33,7 +35,8 @@ def main():
     )
     state_mgr.load()
 
-    logger.info("[同步] 正在从 Testnet 同步账户数据...")
+    sync_label = "实盘" if config.is_live else "Testnet"
+    logger.info("[同步] 正在从 %s 同步账户数据...", sync_label)
     try:
         exchange.sync_state(state_mgr)
     except Exception as e:
@@ -93,7 +96,7 @@ def main():
                 config.RISK_CHECK_INTERVAL_MINUTES, config.HEARTBEAT_INTERVAL_HOURS)
     logger.info("=" * 60)
 
-    notify("Bot 启动", f"余额: ${state_mgr.balance:.2f} | 持仓: {state_mgr.position_count}")
+    notify("Bot 启动", f"[{mode_label}] 余额: ${state_mgr.balance:.2f} | 持仓: {state_mgr.position_count}")
 
     # run_strategy already syncs with Testnet internally, no need to sync again
     logger.info("[启动] 立即执行首次策略扫描...")
@@ -135,11 +138,13 @@ def _heartbeat(exchange: Exchange, state_mgr: StateManager):
 
     # --- 历史统计 ---
     total_closed_pnl = 0.0
+    total_commission = 0.0
     win_count = 0
     lose_count = 0
     for t in history:
         pnl = t.get("pnl", 0)
         total_closed_pnl += pnl
+        total_commission += t.get("commission", 0)
         if pnl > 0:
             win_count += 1
         else:
@@ -154,11 +159,12 @@ def _heartbeat(exchange: Exchange, state_mgr: StateManager):
     lines.append(f"持仓未实现PnL: {unrealized_sign}${total_unrealized_pnl:.2f}")
     lines.append(f"初始资金: ${config.INITIAL_CAPITAL:.2f}")
 
-    lines.append("--- 交易统计 ---")
+    mode_label = "实盘" if config.is_live else "模拟盘"
+    lines.append(f"--- 交易统计 ({mode_label}) ---")
     lines.append(f"持仓: {len(positions)}/{config.MAX_POSITIONS}")
     lines.append(f"已平仓: {len(history)} 笔 | 胜率: {win_rate:.0f}% ({win_count}胜/{lose_count}负)")
     closed_pnl_sign = "+" if total_closed_pnl >= 0 else ""
-    lines.append(f"累计已实现PnL: {closed_pnl_sign}${total_closed_pnl:.2f}")
+    lines.append(f"累计已实现PnL: {closed_pnl_sign}${total_closed_pnl:.2f} | 累计手续费: ${total_commission:.4f}")
 
     if positions:
         lines.append("--- 当前持仓 ---")
