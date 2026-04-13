@@ -93,18 +93,33 @@ class Exchange:
         precision = int(round(-math.log10(step)))
         return math.floor(quantity * 10**precision) / 10**precision
 
-    def place_order(self, symbol: str, side: str, quantity: float) -> dict:
-        """Place a market order. Returns order response with commission info."""
+    def place_order(self, symbol: str, side: str, quantity: float,
+                    position_side: str = None) -> dict:
+        """Place a market order. Returns order response with commission info.
+        position_side: 'LONG'/'SHORT' for hedge mode, None for one-way mode."""
         mode_label = "LIVE" if config.is_live else "PAPER"
-        logger.info(f"[{mode_label}] Placing {side} order: {symbol} qty={quantity}")
-        return self._retry(
-            lambda: self.trading_client.futures_create_order(
-                symbol=symbol,
-                side=side,
-                type="MARKET",
-                quantity=quantity,
-            )
+        logger.info(f"[{mode_label}] Placing {side} order: {symbol} qty={quantity} positionSide={position_side or 'BOTH'}")
+        params = dict(
+            symbol=symbol,
+            side=side,
+            type="MARKET",
+            quantity=quantity,
         )
+        if self._is_hedge_mode():
+            params["positionSide"] = position_side or "BOTH"
+        return self._retry(
+            lambda: self.trading_client.futures_create_order(**params)
+        )
+
+    def _is_hedge_mode(self) -> bool:
+        """Check if account is in hedge mode (dual position side)."""
+        if not hasattr(self, '_hedge_mode'):
+            try:
+                resp = self._retry(lambda: self.trading_client.futures_get_position_mode())
+                self._hedge_mode = resp.get("dualSidePosition", False)
+            except Exception:
+                self._hedge_mode = False
+        return self._hedge_mode
 
     def get_order_commission(self, symbol: str, order_id: int) -> float:
         """Get total USDT commission for an order from trade fills."""

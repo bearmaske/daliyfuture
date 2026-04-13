@@ -181,7 +181,7 @@ def _close_position(
     close_side = "SELL" if pos["side"] == "LONG" else "BUY"
 
     try:
-        order = exchange.place_order(pos["symbol"], close_side, pos["quantity"])
+        order = exchange.place_order(pos["symbol"], close_side, pos["quantity"], position_side=pos["side"])
 
         # Get close commission from trade fills
         close_commission = 0.0

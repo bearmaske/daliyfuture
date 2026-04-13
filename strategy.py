@@ -256,7 +256,7 @@ def _open_position(
     order_side = "BUY" if side == "LONG" else "SELL"
     try:
         exchange.set_leverage(symbol, config.LEVERAGE)
-        order = exchange.place_order(symbol, order_side, quantity)
+        order = exchange.place_order(symbol, order_side, quantity, position_side=side)
 
         # Get actual commission from trade fills
         commission = 0.0
