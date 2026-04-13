@@ -134,7 +134,7 @@ dabao/
 ├── exchange.py      # Binance API 封装（主网行情 + 模拟/实盘下单 + 手续费提取）
 ├── strategy.py      # 布林带策略（SMA 斜率趋势判断 + 突破入场信号）
 ├── risk.py          # ATR 动态移动止损 + 全局熔断强平
-├── notifier.py      # 日志 + Telegram + Bark 通知
+├── notifier.py      # 日志 + Telegram + Bark 通知（自动标注[实盘]/[模拟]）
 ├── state.py         # JSON 状态持久化 + 账户同步
 ├── tests/           # 单元测试
 ├── .env.example     # 环境变量模板
@@ -168,6 +168,12 @@ dabao/
 | `BB_STD` | 2.0 | 布林带标准差倍数 |
 | `TOP_SYMBOLS_COUNT` | 50 | 扫描成交量前 N 币种 |
 | `RISK_CHECK_INTERVAL_MINUTES` | 1 | 止损检查间隔（分钟） |
+
+## 通知
+
+所有推送通知自动在标题前标注交易模式，方便同时运行模拟盘和实盘时区分来源：
+- `[实盘] 开仓 LONG` / `[模拟] 开仓 LONG`
+- `[实盘] 策略执行汇报` / `[模拟] 策略执行汇报`
 
 ## 策略执行汇报
 
