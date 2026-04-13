@@ -206,6 +206,7 @@ BTCUSDT LONG | 入场: 70000.0000 | 现价: 70500.0000 | +$17.86 (+3.6%)
 ## 注意事项
 
 - **默认模拟盘**，不涉及真实资金。切换实盘请确认已充分了解策略风险
+- 自动检测账户持仓模式，**单向持仓（One-way）和双向持仓（Hedge Mode）均兼容**
 - 实盘 API Key 建议：**只开合约交易权限，不开提币权限，绑定 IP 白名单**
 - Binance Testnet API Key 需要在 [testnet.binancefuture.com](https://testnet.binancefuture.com) 单独申请
 - Testnet 的撮合引擎和主网独立，订单簿可能较薄
