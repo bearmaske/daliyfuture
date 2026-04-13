@@ -51,7 +51,7 @@ class Config:
 
     # Scheduling
     STRATEGY_INTERVAL_HOURS: int = 1
-    RISK_CHECK_INTERVAL_MINUTES: int = 2
+    RISK_CHECK_INTERVAL_MINUTES: int = 1
     HEARTBEAT_INTERVAL_HOURS: int = 6
 
     # Files

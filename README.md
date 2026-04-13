@@ -96,7 +96,7 @@ python main.py
 Bot 启动后会持续运行：
 - 启动时立即执行一次策略扫描和止损检查
 - 每小时 :01 扫描市场并检查入场信号
-- 每 2 分钟检查持仓 ATR 移动止损
+- 每 1 分钟检查持仓 ATR 移动止损
 - 每 6 小时发送策略执行汇报（账户状态、持仓盈亏、胜率）
 
 ### 4. 停止 Bot
@@ -151,7 +151,7 @@ dabao/
 | `BB_PERIOD` | 20 | 布林带周期 |
 | `BB_STD` | 2.0 | 布林带标准差倍数 |
 | `TOP_SYMBOLS_COUNT` | 50 | 扫描成交量前 N 币种 |
-| `RISK_CHECK_INTERVAL_MINUTES` | 2 | 止损检查间隔（分钟） |
+| `RISK_CHECK_INTERVAL_MINUTES` | 1 | 止损检查间隔（分钟） |
 
 ## 策略执行汇报
 
