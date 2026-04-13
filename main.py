@@ -115,6 +115,25 @@ def _heartbeat(exchange: Exchange, state_mgr: StateManager):
     positions = state_mgr.state.get("positions", [])
     history = state_mgr.state.get("trade_history", [])
 
+    # --- 账户概览 ---
+    try:
+        summary = exchange.get_account_summary()
+        total_wallet_balance = summary["total_wallet_balance"]
+        total_unrealized_pnl = summary["total_unrealized_pnl"]
+        total_assets = summary["total_margin_balance"]
+        available_balance = summary["available_balance"]
+    except Exception as e:
+        logger.warning("[心跳] 获取账户概览失败: %s", e)
+        total_wallet_balance = state_mgr.balance
+        total_unrealized_pnl = 0.0
+        total_assets = state_mgr.balance
+        available_balance = state_mgr.balance
+
+    profit = total_assets - config.INITIAL_CAPITAL
+    profit_pct = (profit / config.INITIAL_CAPITAL * 100) if config.INITIAL_CAPITAL else 0
+    profit_sign = "+" if profit >= 0 else ""
+
+    # --- 历史统计 ---
     total_closed_pnl = 0.0
     win_count = 0
     lose_count = 0
@@ -128,32 +147,42 @@ def _heartbeat(exchange: Exchange, state_mgr: StateManager):
     win_rate = (win_count / len(history) * 100) if history else 0
 
     lines = []
-    lines.append(f"余额: ${state_mgr.balance:.2f} | 持仓: {len(positions)}/{config.MAX_POSITIONS}")
+    lines.append("--- 资产概览 ---")
+    lines.append(f"总资产: ${total_assets:.2f} | 盈利: {profit_sign}${profit:.2f} ({profit_sign}{profit_pct:.2f}%)")
+    lines.append(f"钱包余额: ${total_wallet_balance:.2f} | 可用余额: ${available_balance:.2f}")
+    unrealized_sign = "+" if total_unrealized_pnl >= 0 else ""
+    lines.append(f"持仓未实现PnL: {unrealized_sign}${total_unrealized_pnl:.2f}")
+    lines.append(f"初始资金: ${config.INITIAL_CAPITAL:.2f}")
+
+    lines.append("--- 交易统计 ---")
+    lines.append(f"持仓: {len(positions)}/{config.MAX_POSITIONS}")
     lines.append(f"已平仓: {len(history)} 笔 | 胜率: {win_rate:.0f}% ({win_count}胜/{lose_count}负)")
-    lines.append(f"累计已实现PnL: ${total_closed_pnl:.2f}")
+    closed_pnl_sign = "+" if total_closed_pnl >= 0 else ""
+    lines.append(f"累计已实现PnL: {closed_pnl_sign}${total_closed_pnl:.2f}")
 
     if positions:
         lines.append("--- 当前持仓 ---")
-        total_unrealized = 0
         for pos in positions:
             try:
                 current_price = exchange.get_price(pos["symbol"])
                 pnl = calculate_pnl(pos["side"], pos["entry_price"], current_price)
-                total_unrealized += pnl
+                pnl_pct = pnl / config.POSITION_SIZE * 100
                 sign = "+" if pnl >= 0 else ""
                 lines.append(
                     f"{pos['symbol']} {pos['side']} | 入场: {pos['entry_price']:.4f} | "
-                    f"现价: {current_price:.4f} | {sign}${pnl:.2f}"
+                    f"现价: {current_price:.4f} | {sign}${pnl:.2f} ({sign}{pnl_pct:.1f}%)"
                 )
             except Exception:
                 lines.append(f"{pos['symbol']} {pos['side']} | 获取价格失败")
-        sign = "+" if total_unrealized >= 0 else ""
-        lines.append(f"未实现PnL合计: {sign}${total_unrealized:.2f}")
     else:
         lines.append("当前无持仓")
 
     lines.append("--- 策略状态 ---")
-    lines.append("策略运行正常")
+    if state_mgr.is_in_cooldown():
+        remaining = state_mgr.cooldown_remaining()
+        lines.append(f"⚠ 冷静期中，暂停开仓 | 剩余: {remaining}")
+    else:
+        lines.append("策略运行正常")
 
     notify("策略执行汇报", "\n".join(lines))
 

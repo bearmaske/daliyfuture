@@ -111,6 +111,24 @@ class Exchange:
                 return float(asset["availableBalance"])
         return 0.0
 
+    def get_account_summary(self) -> dict:
+        """Get account summary: total wallet balance, unrealized PnL, total assets."""
+        account = self._retry(lambda: self.testnet_client.futures_account())
+        total_wallet_balance = float(account.get("totalWalletBalance", 0))
+        total_unrealized_pnl = float(account.get("totalUnrealizedProfit", 0))
+        total_margin_balance = float(account.get("totalMarginBalance", 0))
+        available_balance = 0.0
+        for asset in account.get("assets", []):
+            if asset["asset"] == "USDT":
+                available_balance = float(asset["availableBalance"])
+                break
+        return {
+            "total_wallet_balance": total_wallet_balance,
+            "total_unrealized_pnl": total_unrealized_pnl,
+            "total_margin_balance": total_margin_balance,
+            "available_balance": available_balance,
+        }
+
     def get_open_positions(self) -> list:
         """Get all open positions from testnet account."""
         from datetime import datetime, timezone, timedelta

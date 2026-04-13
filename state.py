@@ -134,6 +134,40 @@ class StateManager:
             self.state["balance"] += amount
         self.save()
 
+    def set_cooldown(self, hours: int):
+        """Enter cooldown mode for the specified number of hours."""
+        until = datetime.now(TZ_CN) + timedelta(hours=hours)
+        with self._lock:
+            self.state["cooldown_until"] = until.strftime("%Y-%m-%d %H:%M:%S")
+        self.save()
+
+    def is_in_cooldown(self) -> bool:
+        """Check if the bot is currently in cooldown period."""
+        cooldown_str = self.state.get("cooldown_until")
+        if not cooldown_str:
+            return False
+        cooldown_until = datetime.strptime(cooldown_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=TZ_CN)
+        if datetime.now(TZ_CN) < cooldown_until:
+            return True
+        # Cooldown expired, clear it
+        with self._lock:
+            self.state.pop("cooldown_until", None)
+        self.save()
+        return False
+
+    def cooldown_remaining(self) -> Optional[str]:
+        """Return remaining cooldown time as a human-readable string, or None."""
+        cooldown_str = self.state.get("cooldown_until")
+        if not cooldown_str:
+            return None
+        cooldown_until = datetime.strptime(cooldown_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=TZ_CN)
+        remaining = cooldown_until - datetime.now(TZ_CN)
+        if remaining.total_seconds() <= 0:
+            return None
+        hours, remainder = divmod(int(remaining.total_seconds()), 3600)
+        minutes = remainder // 60
+        return f"{hours}小时{minutes}分钟"
+
     @property
     def position_count(self) -> int:
         return len(self.state["positions"])

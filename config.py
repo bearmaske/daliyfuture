@@ -27,6 +27,10 @@ class Config:
     ATR_MULTIPLIER: float = 2.0
     MAX_STOP_LOSS: float = 0.06  # hard cap: 6% regardless of ATR
 
+    # Global Drawdown Circuit Breaker
+    MAX_DRAWDOWN_PCT: float = 0.15  # force-close all if total assets drop 15% from initial
+    COOLDOWN_HOURS: int = 24        # cooldown period after circuit breaker triggers
+
     # Trend Filter: "sma" = SMA slope, "bb_middle" = price vs daily BB middle, "disabled" = no filter
     TREND_FILTER_MODE: str = "sma"
     SMA_PERIOD: int = 20  # SMA period for daily trend check (independent of BB_PERIOD)

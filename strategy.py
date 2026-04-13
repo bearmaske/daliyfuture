@@ -89,6 +89,12 @@ def check_entry_signal(
 
 def run_strategy(exchange: Exchange, state_mgr: StateManager):
     """Main strategy loop: scan top symbols, collect signals, open by volume priority."""
+    # Check cooldown period (circuit breaker)
+    if state_mgr.is_in_cooldown():
+        remaining = state_mgr.cooldown_remaining()
+        logger.info("[策略] 冷静期中，暂停开仓 | 剩余: %s", remaining)
+        return
+
     try:
         exchange.sync_state(state_mgr)
     except Exception as e:

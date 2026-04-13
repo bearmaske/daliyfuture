@@ -52,8 +52,58 @@ def should_stop_loss(
         return current_price >= stop_price
 
 
+def check_drawdown(exchange: Exchange, state_mgr: StateManager) -> bool:
+    """Check if total assets have dropped beyond MAX_DRAWDOWN_PCT.
+    If triggered, force-close all positions and enter cooldown.
+    Returns True if circuit breaker was triggered."""
+    if state_mgr.is_in_cooldown():
+        return False  # already in cooldown, positions already closed
+
+    try:
+        summary = exchange.get_account_summary()
+        total_assets = summary["total_margin_balance"]
+    except Exception as e:
+        logger.warning("[熔断] 获取账户数据失败: %s", e)
+        return False
+
+    drawdown_pct = (config.INITIAL_CAPITAL - total_assets) / config.INITIAL_CAPITAL
+    threshold = config.MAX_DRAWDOWN_PCT
+
+    if drawdown_pct < threshold:
+        return False
+
+    # Circuit breaker triggered!
+    logger.warning("[熔断] 总资产 $%.2f, 回撤 %.1f%% 超过阈值 %.0f%%, 触发强制平仓!",
+                   total_assets, drawdown_pct * 100, threshold * 100)
+
+    positions = list(state_mgr.state.get("positions", []))
+    closed_count = 0
+    for pos in positions:
+        try:
+            current_price = exchange.get_price(pos["symbol"])
+            _close_position(exchange, state_mgr, pos, current_price, "熔断强平")
+            closed_count += 1
+        except Exception as e:
+            logger.error("[熔断] 平仓 %s 失败: %s", pos["symbol"], e)
+
+    state_mgr.set_cooldown(config.COOLDOWN_HOURS)
+
+    loss_pct = drawdown_pct * 100
+    notify(
+        "⚠ 熔断触发 — 全部平仓",
+        f"总资产: ${total_assets:.2f} | 亏损: -{loss_pct:.1f}%\n"
+        f"已平仓 {closed_count}/{len(positions)} 个仓位\n"
+        f"进入冷静期 {config.COOLDOWN_HOURS} 小时，期间暂停开仓",
+    )
+    return True
+
+
 def check_stop_loss(exchange: Exchange, state_mgr: StateManager):
     """Check all open positions for ATR trailing stop triggers."""
+    # Check global drawdown circuit breaker first
+    if check_drawdown(exchange, state_mgr):
+        return  # all positions closed, skip individual checks
+
     positions = list(state_mgr.state.get("positions", []))
     if not positions:
         return
