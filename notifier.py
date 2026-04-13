@@ -57,11 +57,16 @@ file_handler = DailyFileHandler(LOG_DIR)
 logger.addHandler(file_handler)
 
 
+def _mode_prefix() -> str:
+    return "[实盘]" if config.is_live else "[模拟]"
+
+
 def notify(title: str, message: str):
     """Send notification via all channels. Failures are logged but don't propagate."""
-    logger.info(f"{title} | {message}")
-    _send_telegram(title, message)
-    _send_bark(title, message)
+    prefixed_title = f"{_mode_prefix()} {title}"
+    logger.info(f"{prefixed_title} | {message}")
+    _send_telegram(prefixed_title, message)
+    _send_bark(prefixed_title, message)
 
 
 def _send_telegram(title: str, message: str):
