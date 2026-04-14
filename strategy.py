@@ -258,28 +258,23 @@ def _open_position(
         exchange.set_leverage(symbol, config.LEVERAGE)
         order = exchange.place_order(symbol, order_side, quantity, position_side=side)
 
-        # Get actual commission from trade fills
-        commission = 0.0
-        order_id = order.get("orderId")
-        if order_id:
-            try:
-                commission = exchange.get_order_commission(symbol, order_id)
-            except Exception as e:
-                logger.warning("[开仓] %s 获取手续费失败: %s", symbol, e)
+        # Store open order ID; commission will be queried at close time
+        # (trade fills have propagation delay on Binance, not available immediately)
+        open_order_id = order.get("orderId")
 
         state_mgr.add_position(
             symbol=symbol,
             side=side,
             entry_price=current_price,
             quantity=quantity,
-            open_commission=commission,
+            open_order_id=open_order_id,
         )
         state_mgr.update_balance(-config.POSITION_SIZE)
 
         notify(
             f"开仓 {side}",
             f"{symbol} | 价格 {current_price:.4f} | 数量 {quantity} | "
-            f"保证金 ${config.POSITION_SIZE} | 手续费 ${commission:.4f}",
+            f"保证金 ${config.POSITION_SIZE}",
         )
     except Exception as e:
         logger.error(f"Failed to open {side} {symbol}: {e}")

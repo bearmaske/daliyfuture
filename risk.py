@@ -183,17 +183,18 @@ def _close_position(
     try:
         order = exchange.place_order(pos["symbol"], close_side, pos["quantity"], position_side=pos["side"])
 
-        # Get close commission from trade fills
-        close_commission = 0.0
-        order_id = order.get("orderId")
-        if order_id:
-            try:
-                close_commission = exchange.get_order_commission(pos["symbol"], order_id)
-            except Exception as e:
-                logger.warning("[平仓] %s 获取手续费失败: %s", pos["symbol"], e)
-
-        open_commission = pos.get("open_commission", 0.0)
-        total_commission = open_commission + close_commission
+        # Query commission for both open and close orders
+        # (open order fills are now available since enough time has passed)
+        total_commission = 0.0
+        open_order_id = pos.get("open_order_id")
+        close_order_id = order.get("orderId")
+        for label, oid in [("开仓", open_order_id), ("平仓", close_order_id)]:
+            if oid:
+                try:
+                    c = exchange.get_order_commission(pos["symbol"], oid)
+                    total_commission += c
+                except Exception as e:
+                    logger.warning("[平仓] %s %s手续费获取失败: %s", pos["symbol"], label, e)
 
         raw_pnl = calculate_pnl(pos["side"], pos["entry_price"], exit_price)
         net_pnl = raw_pnl - total_commission

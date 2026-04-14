@@ -47,7 +47,7 @@ class StateManager:
 
     def add_position(
         self, symbol: str, side: str, entry_price: float, quantity: float,
-        open_commission: float = 0.0,
+        open_order_id: int = None,
     ) -> dict:
         with self._lock:
             pos = {
@@ -58,7 +58,7 @@ class StateManager:
                 "quantity": quantity,
                 "highest_price": entry_price,
                 "lowest_price": entry_price,
-                "open_commission": open_commission,
+                "open_order_id": open_order_id,
                 "opened_at": now_cn(),
             }
             self.state["positions"].append(pos)
