@@ -271,10 +271,24 @@ def _open_position(
         )
         state_mgr.update_balance(-config.POSITION_SIZE)
 
+        # Fetch funding rate info for notification
+        funding_msg = ""
+        try:
+            fi = exchange.get_funding_info(symbol)
+            rate_sign = "+" if fi["rate"] >= 0 else ""
+            # Positive rate: longs pay shorts; Negative rate: shorts pay longs
+            if side == "LONG":
+                pay_label = "付出" if fi["rate"] > 0 else "收取"
+            else:
+                pay_label = "收取" if fi["rate"] > 0 else "付出"
+            funding_msg = f"\n资金费率: {rate_sign}{fi['rate_pct']:.4f}% ({pay_label}) | 下次收取: {fi['next_time']}"
+        except Exception:
+            pass
+
         notify(
             f"开仓 {side}",
             f"{symbol} | 价格 {current_price:.4f} | 数量 {quantity} | "
-            f"保证金 ${config.POSITION_SIZE}",
+            f"保证金 ${config.POSITION_SIZE}{funding_msg}",
         )
     except Exception as e:
         logger.error(f"Failed to open {side} {symbol}: {e}")

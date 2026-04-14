@@ -61,6 +61,22 @@ class Exchange:
             if t["symbol"] in symbol_set
         }
 
+    def get_funding_info(self, symbol: str) -> dict:
+        """Get current funding rate and next funding time for a symbol."""
+        from datetime import datetime, timezone, timedelta
+        tz_cn = timezone(timedelta(hours=8))
+        mark = self._retry(lambda: self.data_client.futures_mark_price(symbol=symbol))
+        rate = float(mark.get("lastFundingRate", 0))
+        next_ts = int(mark.get("nextFundingTime", 0))
+        next_time = datetime.fromtimestamp(
+            next_ts / 1000, tz=tz_cn
+        ).strftime("%H:%M") if next_ts else "--:--"
+        return {
+            "rate": rate,
+            "rate_pct": rate * 100,
+            "next_time": next_time,
+        }
+
     def get_klines(self, symbol: str, interval: str, limit: int) -> list:
         """Get klines from mainnet. Returns list of [open_time, open, high, low, close, volume, ...]."""
         return self._retry(
