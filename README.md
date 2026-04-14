@@ -93,18 +93,24 @@ BINANCE_TESTNET_API_SECRET=你的secret
 BINANCE_LIVE_API_KEY=你的key
 BINANCE_LIVE_API_SECRET=你的secret
 
-# 可选 — Telegram 通知
+# --- 通知渠道（实盘用 Bark，模拟盘用 PushDeer + Telegram）---
+
+# Telegram（模拟盘通道）
 TELEGRAM_ENABLED=false
 TELEGRAM_BOT_TOKEN=你的bot_token
 TELEGRAM_CHAT_ID=你的chat_id
 
-# 可选 — Bark 通知（iOS 推送，支持多设备，逗号分隔）
+# PushDeer（模拟盘通道，多个 key 逗号分隔）
+PUSHDEER_ENABLED=false
+PUSHDEER_KEYS=你的pushkey1,你的pushkey2
+
+# Bark（实盘通道，多个 URL 逗号分隔）
 BARK_ENABLED=false
 BARK_URLS=https://api.day.app/key1,https://api.day.app/key2
 ```
 
 > **默认模拟盘模式。** 切换实盘：将 `TRADING_MODE` 改为 `live` 并填入主网 API 密钥。
-> **Telegram 和 Bark 默认关闭。** 需要哪个就把对应的 `_ENABLED` 改为 `true` 并填入密钥。
+> **通知渠道默认关闭。** 模拟盘开启 PushDeer/Telegram，实盘开启 Bark，把对应的 `_ENABLED` 改为 `true` 并填入密钥。
 
 ### 3. 启动 Bot
 
@@ -139,7 +145,7 @@ dabao/
 ├── exchange.py      # Binance API 封装（主网行情 + 模拟/实盘下单 + 手续费提取）
 ├── strategy.py      # 布林带策略（SMA 斜率趋势判断 + 突破入场信号）
 ├── risk.py          # ATR 动态移动止损 + 全局熔断强平
-├── notifier.py      # 日志 + Telegram + Bark 通知（自动标注[实盘]/[模拟]）
+├── notifier.py      # 日志 + 通知路由（实盘→Bark / 模拟→PushDeer+Telegram）
 ├── state.py         # JSON 状态持久化 + 账户同步
 ├── tests/           # 单元测试
 ├── .env.example     # 环境变量模板
@@ -176,9 +182,12 @@ dabao/
 
 ## 通知
 
-所有推送通知自动在标题前标注交易模式，方便同时运行模拟盘和实盘时区分来源：
-- `[实盘] 开仓 LONG` / `[模拟] 开仓 LONG`
-- `[实盘] 策略执行汇报` / `[模拟] 策略执行汇报`
+模拟盘和实盘使用**不同的通知渠道**，互不干扰：
+
+| 模式 | 通知渠道 | 标题前缀 |
+|------|----------|----------|
+| 模拟盘 (`paper`) | PushDeer + Telegram | `[模拟]` |
+| 实盘 (`live`) | Bark | `[实盘]` |
 
 ## 策略执行汇报
 

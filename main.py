@@ -25,8 +25,11 @@ def main():
                 config.BB_PERIOD, config.BB_STD, config.TOP_SYMBOLS_COUNT)
 
     channels = ["日志: ON"]
-    channels.append(f"Telegram: {'ON' if config.TELEGRAM_ENABLED else 'OFF'}")
-    channels.append(f"Bark: {'ON' if config.BARK_ENABLED else 'OFF'}")
+    if config.is_live:
+        channels.append(f"Bark: {'ON' if config.BARK_ENABLED else 'OFF'} (实盘通道)")
+    else:
+        channels.append(f"PushDeer: {'ON' if config.PUSHDEER_ENABLED else 'OFF'} (模拟通道)")
+        channels.append(f"Telegram: {'ON' if config.TELEGRAM_ENABLED else 'OFF'} (模拟通道)")
     logger.info("[通知] %s", " | ".join(channels))
 
     exchange = Exchange()

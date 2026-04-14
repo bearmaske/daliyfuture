@@ -62,11 +62,15 @@ def _mode_prefix() -> str:
 
 
 def notify(title: str, message: str):
-    """Send notification via all channels. Failures are logged but don't propagate."""
+    """Send notification via mode-specific channels.
+    Live: Bark only. Paper: PushDeer + Telegram."""
     prefixed_title = f"{_mode_prefix()} {title}"
     logger.info(f"{prefixed_title} | {message}")
-    _send_telegram(prefixed_title, message)
-    _send_bark(prefixed_title, message)
+    if config.is_live:
+        _send_bark(prefixed_title, message)
+    else:
+        _send_pushdeer(prefixed_title, message)
+        _send_telegram(prefixed_title, message)
 
 
 def _send_telegram(title: str, message: str):
@@ -91,6 +95,28 @@ def _send_telegram(title: str, message: str):
             asyncio.run(_send())
     except Exception as e:
         logger.warning(f"Telegram notification failed: {e}")
+
+
+def _send_pushdeer(title: str, message: str):
+    if not config.PUSHDEER_ENABLED or not config.PUSHDEER_KEYS:
+        return
+    for pushkey in config.PUSHDEER_KEYS:
+        try:
+            params = urllib.parse.urlencode({
+                "pushkey": pushkey,
+                "text": title,
+                "desp": message,
+                "type": "text",
+            }).encode("utf-8")
+            req = urllib.request.Request(
+                "https://api2.pushdeer.com/message/push",
+                data=params,
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                pass
+        except Exception as e:
+            logger.warning(f"PushDeer notification failed: {e}")
 
 
 def _send_bark(title: str, message: str):

@@ -20,6 +20,8 @@ class Config:
     TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
     BARK_ENABLED: bool = os.getenv("BARK_ENABLED", "false").lower() == "true"
     BARK_URLS: list = None
+    PUSHDEER_ENABLED: bool = os.getenv("PUSHDEER_ENABLED", "false").lower() == "true"
+    PUSHDEER_KEYS: list = None
 
     # Capital & Position
     INITIAL_CAPITAL: float = 10000.0
@@ -72,6 +74,10 @@ class Config:
         if self.BARK_URLS is None:
             raw = os.getenv("BARK_URLS", "")
             self.BARK_URLS = [u.strip() for u in raw.split(",") if u.strip()]
+        # Support multiple PushDeer keys, comma-separated
+        if self.PUSHDEER_KEYS is None:
+            raw = os.getenv("PUSHDEER_KEYS", "")
+            self.PUSHDEER_KEYS = [k.strip() for k in raw.split(",") if k.strip()]
 
     @property
     def is_live(self) -> bool:
