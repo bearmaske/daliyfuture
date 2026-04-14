@@ -113,8 +113,10 @@ class StateManager:
         exit_price: float,
         quantity: float,
         pnl: float,
-        commission: float,
-        opened_at: str,
+        commission: float = None,
+        open_order_id: int = None,
+        close_order_id: int = None,
+        opened_at: str = None,
     ):
         with self._lock:
             trade = {
@@ -126,6 +128,8 @@ class StateManager:
                 "quantity": quantity,
                 "pnl": pnl,
                 "commission": commission,
+                "open_order_id": open_order_id,
+                "close_order_id": close_order_id,
                 "opened_at": opened_at,
                 "closed_at": now_cn(),
             }

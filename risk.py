@@ -183,21 +183,12 @@ def _close_position(
     try:
         order = exchange.place_order(pos["symbol"], close_side, pos["quantity"], position_side=pos["side"])
 
-        # Query commission for both open and close orders
-        # (open order fills are now available since enough time has passed)
-        total_commission = 0.0
+        raw_pnl = calculate_pnl(pos["side"], pos["entry_price"], exit_price)
+
+        # Store order IDs; commission will be backfilled by heartbeat
+        # (Binance trade fills have propagation delay, not available immediately)
         open_order_id = pos.get("open_order_id")
         close_order_id = order.get("orderId")
-        for label, oid in [("开仓", open_order_id), ("平仓", close_order_id)]:
-            if oid:
-                try:
-                    c = exchange.get_order_commission(pos["symbol"], oid)
-                    total_commission += c
-                except Exception as e:
-                    logger.warning("[平仓] %s %s手续费获取失败: %s", pos["symbol"], label, e)
-
-        raw_pnl = calculate_pnl(pos["side"], pos["entry_price"], exit_price)
-        net_pnl = raw_pnl - total_commission
 
         state_mgr.remove_position(pos["id"])
         state_mgr.add_trade_history(
@@ -206,16 +197,18 @@ def _close_position(
             entry_price=pos["entry_price"],
             exit_price=exit_price,
             quantity=pos["quantity"],
-            pnl=net_pnl,
-            commission=total_commission,
+            pnl=raw_pnl,
+            commission=None,
+            open_order_id=open_order_id,
+            close_order_id=close_order_id,
             opened_at=pos["opened_at"],
         )
-        state_mgr.update_balance(config.POSITION_SIZE + net_pnl)
+        state_mgr.update_balance(config.POSITION_SIZE + raw_pnl)
 
         notify(
             f"平仓 {pos['side']} ({reason})",
             f"{pos['symbol']} | 入场 {pos['entry_price']:.4f} | 出场 {exit_price:.4f} | "
-            f"PnL ${net_pnl:.2f} (手续费 ${total_commission:.4f})",
+            f"PnL ${raw_pnl:.2f} (手续费待结算)",
         )
     except Exception as e:
         logger.error(f"Failed to close {pos['symbol']}: {e}")

@@ -109,6 +109,30 @@ def main():
         pass
 
 
+def _backfill_commission(exchange: Exchange, state_mgr: StateManager, history: list):
+    """Backfill commission for trades that don't have it yet.
+    Binance trade fills have propagation delay, so we query later."""
+    updated = False
+    for trade in history:
+        if trade.get("commission") is not None:
+            continue
+        symbol = trade["symbol"]
+        total_commission = 0.0
+        for label, oid in [("开仓", trade.get("open_order_id")), ("平仓", trade.get("close_order_id"))]:
+            if oid:
+                try:
+                    c = exchange.get_order_commission(symbol, oid)
+                    total_commission += c
+                except Exception as e:
+                    logger.warning("[手续费补查] %s %s (orderId=%s) 失败: %s", symbol, label, oid, e)
+        trade["commission"] = total_commission
+        trade["pnl"] = trade["pnl"] - total_commission
+        updated = True
+        logger.info("[手续费补查] %s | 手续费: $%.4f | 净PnL: $%.2f", symbol, total_commission, trade["pnl"])
+    if updated:
+        state_mgr.save()
+
+
 def _heartbeat(exchange: Exchange, state_mgr: StateManager):
     try:
         exchange.sync_state(state_mgr)
@@ -117,6 +141,9 @@ def _heartbeat(exchange: Exchange, state_mgr: StateManager):
 
     positions = state_mgr.state.get("positions", [])
     history = state_mgr.state.get("trade_history", [])
+
+    # --- 补查手续费 ---
+    _backfill_commission(exchange, state_mgr, history)
 
     # --- 账户概览 ---
     try:
@@ -144,7 +171,7 @@ def _heartbeat(exchange: Exchange, state_mgr: StateManager):
     for t in history:
         pnl = t.get("pnl", 0)
         total_closed_pnl += pnl
-        total_commission += t.get("commission", 0)
+        total_commission += t.get("commission") or 0
         if pnl > 0:
             win_count += 1
         else:
