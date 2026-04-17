@@ -45,8 +45,8 @@ def main():
     except Exception as e:
         logger.warning("[同步] 同步失败，使用本地数据: %s", e)
 
-    logger.info("[状态] 余额: $%.2f | 当前持仓: %d",
-                state_mgr.balance, state_mgr.position_count)
+    logger.info("[状态] 余额: $%.2f | 当前持仓: %d | 运行时长: %s",
+                state_mgr.balance, state_mgr.position_count, state_mgr.get_runtime())
 
     scheduler = BlockingScheduler()
 
@@ -191,6 +191,7 @@ def _heartbeat(exchange: Exchange, state_mgr: StateManager):
 
     mode_label = "实盘" if config.is_live else "模拟盘"
     lines.append(f"--- 交易统计 ({mode_label}) ---")
+    lines.append(f"运行时长: {state_mgr.get_runtime()} (自 {state_mgr.state.get('started_at', '?')})")
     lines.append(f"持仓: {len(positions)}/{config.MAX_POSITIONS}")
     lines.append(f"已平仓: {len(history)} 笔 | 胜率: {win_rate:.0f}% ({win_count}胜/{lose_count}负)")
     closed_pnl_sign = "+" if total_closed_pnl >= 0 else ""
