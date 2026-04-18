@@ -55,6 +55,10 @@ class Config:
     # Scanning
     TOP_SYMBOLS_COUNT: int = 50
     STABLECOIN_FILTER: list = None
+    # Skip tokenized stock + pre-IPO perpetuals (different dynamics, follow equity market)
+    EXCLUDE_EQUITY_PERPS: bool = True
+    # Skip crypto majors (too efficient, edge is in mid-cap momentum). Edit freely.
+    EXCLUDE_TOP10_SYMBOLS: list = None
 
     # Scheduling
     STRATEGY_INTERVAL_HOURS: int = 1
@@ -72,6 +76,11 @@ class Config:
         if self.STABLECOIN_FILTER is None:
             self.STABLECOIN_FILTER = [
                 "BUSDUSDT", "USDCUSDT", "TUSDUSDT", "DAIUSDT", "FDUSDUSDT"
+            ]
+        if self.EXCLUDE_TOP10_SYMBOLS is None:
+            self.EXCLUDE_TOP10_SYMBOLS = [
+                "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
+                "DOGEUSDT", "ADAUSDT", "TRXUSDT", "TONUSDT", "AVAXUSDT",
             ]
         # Support multiple Bark URLs, comma-separated
         if self.BARK_URLS is None:

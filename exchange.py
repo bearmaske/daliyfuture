@@ -28,6 +28,7 @@ class Exchange:
         # Trading client lazy-initialized (testnet or mainnet depending on mode)
         self._trading_client = None
         self._symbol_filters = {}
+        self._underlying_types = {}
         self._filters_loaded = False
 
     @property
@@ -55,14 +56,27 @@ class Exchange:
     def get_top_symbols(self, limit: Optional[int] = None) -> List[str]:
         """Get top N USDT perpetual futures by quote volume."""
         limit = limit or config.TOP_SYMBOLS_COUNT
+        self._load_exchange_info()
         tickers = self._retry(lambda: self.data_client.futures_ticker())
-        # Filter USDT pairs, exclude stablecoins
-        usdt_tickers = [
-            t for t in tickers
-            if t["symbol"].endswith("USDT")
-            and t["symbol"] not in config.STABLECOIN_FILTER
-        ]
-        # Sort by quote asset volume descending
+        top10_set = set(config.EXCLUDE_TOP10_SYMBOLS or [])
+        excluded_equity = config.EXCLUDE_EQUITY_PERPS
+        skipped_equity, skipped_top10 = [], []
+        usdt_tickers = []
+        for t in tickers:
+            sym = t["symbol"]
+            if not sym.endswith("USDT") or sym in config.STABLECOIN_FILTER:
+                continue
+            if excluded_equity and self._underlying_types.get(sym, "COIN") in ("EQUITY", "PREMARKET"):
+                skipped_equity.append(sym)
+                continue
+            if sym in top10_set:
+                skipped_top10.append(sym)
+                continue
+            usdt_tickers.append(t)
+        if skipped_equity:
+            logger.info("[扫描] 跳过股票/预上市: %s", ", ".join(skipped_equity))
+        if skipped_top10:
+            logger.info("[扫描] 跳过市值前10: %s", ", ".join(skipped_top10))
         usdt_tickers.sort(key=lambda x: float(x["quoteVolume"]), reverse=True)
         return [t["symbol"] for t in usdt_tickers[:limit]]
 
@@ -107,16 +121,27 @@ class Exchange:
         )
         return float(ticker["price"])
 
+    def _load_exchange_info(self):
+        """Load symbol filters and underlying types (cached)."""
+        if self._filters_loaded:
+            return
+        info = self._retry(lambda: self.data_client.futures_exchange_info())
+        for s in info["symbols"]:
+            self._underlying_types[s["symbol"]] = s.get("underlyingType", "COIN")
+            for f in s["filters"]:
+                if f["filterType"] == "LOT_SIZE":
+                    self._symbol_filters[s["symbol"]] = float(f["stepSize"])
+        self._filters_loaded = True
+
     def get_step_size(self, symbol: str) -> float:
         """Get lot step size for quantity rounding."""
-        if not self._filters_loaded:
-            info = self._retry(lambda: self.data_client.futures_exchange_info())
-            for s in info["symbols"]:
-                for f in s["filters"]:
-                    if f["filterType"] == "LOT_SIZE":
-                        self._symbol_filters[s["symbol"]] = float(f["stepSize"])
-            self._filters_loaded = True
+        self._load_exchange_info()
         return self._symbol_filters.get(symbol, 0.001)
+
+    def get_underlying_type(self, symbol: str) -> str:
+        """Get underlyingType (COIN/EQUITY/COMMODITY/INDEX/PREMARKET)."""
+        self._load_exchange_info()
+        return self._underlying_types.get(symbol, "COIN")
 
     def round_quantity(self, symbol: str, quantity: float) -> float:
         """Round quantity down to valid step size."""
