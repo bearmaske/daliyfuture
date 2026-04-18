@@ -243,7 +243,8 @@ class Exchange:
         return self._hedge_mode
 
     def get_order_commission(self, symbol: str, order_id: int) -> float:
-        """Get total USDT commission for an order from trade fills."""
+        """Get total USDT commission for an order from trade fills
+        (per GET /fapi/v1/userTrades, response field `commission`)."""
         trades = self._retry(
             lambda: self.trading_client.futures_account_trades(
                 symbol=symbol, orderId=order_id
@@ -263,6 +264,42 @@ class Exchange:
                 except Exception:
                     total_commission += commission  # fallback: use raw value
         return total_commission
+
+    def get_total_commission_since(self, start_ms: int) -> float:
+        """Sum all platform-reported commission since `start_ms` using
+        GET /fapi/v1/income with incomeType=COMMISSION. Returns absolute USDT
+        amount paid (positive). Handles pagination (1000 rows per call) and
+        converts BNB commissions to USDT at current price."""
+        PAGE = 1000
+        cursor = int(start_ms)
+        now_ms = int(time.time() * 1000)
+        total_usdt = 0.0
+        total_bnb = 0.0
+        while cursor < now_ms:
+            rows = self._retry(lambda c=cursor: self.trading_client.futures_income_history(
+                incomeType="COMMISSION", startTime=c, limit=PAGE,
+            ))
+            if not rows:
+                break
+            for r in rows:
+                amt = float(r["income"])  # commission rows are negative (outflow)
+                if r.get("asset") == "BNB":
+                    total_bnb += amt
+                else:
+                    total_usdt += amt
+            if len(rows) < PAGE:
+                break
+            # advance cursor past the last row to avoid duplicate ingestion
+            cursor = int(rows[-1]["time"]) + 1
+        # Convert BNB portion
+        if total_bnb != 0:
+            try:
+                bnb_price = float(self.data_client.get_symbol_ticker(symbol="BNBUSDT")["price"])
+                total_usdt += total_bnb * bnb_price
+            except Exception:
+                total_usdt += total_bnb
+        # Income is negative for commissions paid; return positive magnitude
+        return abs(total_usdt)
 
     def set_leverage(self, symbol: str, leverage: int):
         """Set leverage for a symbol on testnet."""

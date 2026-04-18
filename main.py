@@ -2,12 +2,16 @@ import signal
 import sys
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.events import EVENT_JOB_ERROR
+from datetime import datetime, timezone, timedelta
+
 from config import config
 from exchange import Exchange
 from state import StateManager, get_runtime
 from strategy import run_strategy
 from risk import check_stop_loss, calculate_pnl
 from notifier import notify, logger
+
+TZ_CN = timezone(timedelta(hours=8))
 
 
 def main():
@@ -195,7 +199,15 @@ def _heartbeat(exchange: Exchange, state_mgr: StateManager):
     lines.append(f"持仓: {len(positions)}/{config.MAX_POSITIONS}")
     lines.append(f"已平仓: {len(history)} 笔 | 胜率: {win_rate:.0f}% ({win_count}胜/{lose_count}负)")
     closed_pnl_sign = "+" if total_closed_pnl >= 0 else ""
-    lines.append(f"累计已实现PnL: {closed_pnl_sign}${total_closed_pnl:.2f} | 累计手续费: ${total_commission:.4f}")
+    lines.append(f"累计已实现PnL: {closed_pnl_sign}${total_closed_pnl:.2f} | 累计手续费(重建): ${total_commission:.4f}")
+
+    # Platform-reported commission via GET /fapi/v1/income?incomeType=COMMISSION
+    try:
+        start_dt = datetime.strptime(config.STRATEGY_START_TIME, "%Y-%m-%d %H:%M:%S").replace(tzinfo=TZ_CN)
+        platform_commission = exchange.get_total_commission_since(int(start_dt.timestamp() * 1000))
+        lines.append(f"平台手续费(/income): ${platform_commission:.4f}")
+    except Exception as e:
+        logger.warning("[心跳] 获取平台手续费失败: %s", e)
 
     if positions:
         lines.append("--- 当前持仓 ---")
