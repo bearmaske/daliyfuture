@@ -8,7 +8,7 @@
 
 三层过滤 + 优先排序：
 
-1. **选币**：取成交量前 50 的 USDT 永续合约，排除稳定币对
+1. **选币**：取成交量前 50 的 USDT 永续合约，排除稳定币对、股票/预上市类永续（TSLA/COIN/MSTR 等，`underlyingType=EQUITY/PREMARKET`）、市值前 10 的主流币（BTC/ETH/BNB/SOL/XRP/DOGE/ADA/TRX/TON/AVAX，可通过 `EXCLUDE_TOP10_SYMBOLS` 自定义）
 2. **日线趋势判断**（可配置模式，`TREND_FILTER_MODE`）：
    - `sma`（默认）：SMA 斜率方向 + 价格位置 → 判断做多/做空/跳过
    - `bb_middle`：价格 > 日线布林中轨 → 只做多，< 中轨 → 只做空
@@ -178,7 +178,10 @@ dabao/
 | `BB_PERIOD` | 20 | 布林带周期 |
 | `BB_STD` | 2.0 | 布林带标准差倍数 |
 | `TOP_SYMBOLS_COUNT` | 50 | 扫描成交量前 N 币种 |
+| `EXCLUDE_EQUITY_PERPS` | True | 跳过股票/预上市类永续（EQUITY / PREMARKET） |
+| `EXCLUDE_TOP10_SYMBOLS` | BTC/ETH/BNB/SOL/XRP/DOGE/ADA/TRX/TON/AVAX | 跳过市值前 10 主流币，自由编辑 |
 | `RISK_CHECK_INTERVAL_MINUTES` | 1 | 止损检查间隔（分钟） |
+| `STRATEGY_START_TIME` | "2026-04-13 00:00:00" | 策略起始时间（UTC+8），用于心跳汇报显示运行时长 |
 
 ## 通知
 
