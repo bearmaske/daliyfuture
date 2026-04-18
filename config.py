@@ -61,6 +61,11 @@ class Config:
     EXCLUDE_TOP10_SYMBOLS: list = None
     # Minimum 24h quote volume (USDT). Protects against thin-liquidity coins.
     MIN_QUOTE_VOLUME_24H: float = 50_000_000.0
+    # Additional "spike pool": include coins whose most recent closed 1H quote
+    # volume is >= MIN_1H_QUOTE_VOLUME, even if they miss the 24h top-N list.
+    # Designed to catch 爆涨暴跌 that hasn't shown up in the 24h average yet.
+    ENABLE_1H_SPIKE_POOL: bool = True
+    MIN_1H_QUOTE_VOLUME: float = 10_000_000.0
 
     # Scheduling
     STRATEGY_INTERVAL_HOURS: int = 1

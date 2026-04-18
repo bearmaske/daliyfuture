@@ -1,5 +1,6 @@
 import math
 import time
+import concurrent.futures as _cf
 from typing import Optional, List
 from urllib.parse import urlencode
 from binance.client import Client
@@ -54,15 +55,25 @@ class Exchange:
         return self.trading_client
 
     def get_top_symbols(self, limit: Optional[int] = None) -> List[str]:
-        """Get top N USDT perpetual futures by quote volume."""
+        """Return scan pool: top-N by 24h volume UNION coins with a 1H volume spike.
+
+        Pool A (24h): stablecoin/equity/top10 filtered, 24h volume >= MIN_QUOTE_VOLUME_24H,
+        ranked desc, take top N.
+
+        Pool B (1H spike, optional): same symbol filters, last-closed 1H quote volume
+        >= MIN_1H_QUOTE_VOLUME. Designed to catch explosive moves whose 24h average
+        hasn't caught up yet.
+        """
         limit = limit or config.TOP_SYMBOLS_COUNT
         self._load_exchange_info()
         tickers = self._retry(lambda: self.data_client.futures_ticker())
         top10_set = set(config.EXCLUDE_TOP10_SYMBOLS or [])
         excluded_equity = config.EXCLUDE_EQUITY_PERPS
         min_vol = config.MIN_QUOTE_VOLUME_24H
-        skipped_equity, skipped_top10, skipped_low_vol = [], [], 0
-        usdt_tickers = []
+        skipped_equity, skipped_top10 = [], []
+
+        # Eligible universe (passes the non-volume filters)
+        eligible = []
         for t in tickers:
             sym = t["symbol"]
             if not sym.endswith("USDT") or sym in config.STABLECOIN_FILTER:
@@ -73,18 +84,53 @@ class Exchange:
             if sym in top10_set:
                 skipped_top10.append(sym)
                 continue
-            if float(t.get("quoteVolume", 0)) < min_vol:
-                skipped_low_vol += 1
-                continue
-            usdt_tickers.append(t)
+            eligible.append(t)
+
         if skipped_equity:
             logger.info("[扫描] 跳过股票/预上市: %s", ", ".join(skipped_equity))
         if skipped_top10:
             logger.info("[扫描] 跳过市值前10: %s", ", ".join(skipped_top10))
-        if skipped_low_vol:
-            logger.info("[扫描] 跳过成交额 < $%.0fM: %d 个", min_vol / 1e6, skipped_low_vol)
-        usdt_tickers.sort(key=lambda x: float(x["quoteVolume"]), reverse=True)
-        return [t["symbol"] for t in usdt_tickers[:limit]]
+
+        # Pool A: top N by 24h volume (with 24h floor)
+        pool_a = [t for t in eligible if float(t.get("quoteVolume", 0)) >= min_vol]
+        pool_a.sort(key=lambda x: float(x["quoteVolume"]), reverse=True)
+        pool_a_syms = [t["symbol"] for t in pool_a[:limit]]
+        logger.info("[扫描] 24h 池: %d 个 (≥ $%.0fM)", len(pool_a_syms), min_vol / 1e6)
+
+        if not config.ENABLE_1H_SPIKE_POOL:
+            return pool_a_syms
+
+        # Pool B: 1H spike. Fetch last-closed 1H volume for every eligible symbol.
+        spike_syms = self._scan_1h_spikes(
+            [t["symbol"] for t in eligible], config.MIN_1H_QUOTE_VOLUME
+        )
+        # Sort spike additions by their own 1H volume desc for deterministic order
+        extras = [s for s in spike_syms if s not in pool_a_syms]
+        if extras:
+            logger.info("[扫描] 1H 爆量池(追加): %d 个 (≥ $%.0fM): %s",
+                        len(extras), config.MIN_1H_QUOTE_VOLUME / 1e6, ", ".join(extras))
+        return pool_a_syms + extras
+
+    def _scan_1h_spikes(self, symbols: List[str], min_qvol: float) -> List[str]:
+        """Fetch last-closed 1H quote volume for each symbol in parallel.
+        Returns symbols whose 1H quote volume >= min_qvol, sorted desc."""
+        def _fetch(sym):
+            try:
+                kl = self.data_client.futures_klines(symbol=sym, interval="1h", limit=2)
+                if len(kl) < 2:
+                    return sym, 0.0
+                return sym, float(kl[-2][7])  # last CLOSED kline, quote volume at index 7
+            except Exception as e:
+                logger.debug("[1H扫描] %s 失败: %s", sym, e)
+                return sym, 0.0
+
+        results = []
+        with _cf.ThreadPoolExecutor(max_workers=20) as ex:
+            for sym, qvol in ex.map(_fetch, symbols):
+                if qvol >= min_qvol:
+                    results.append((sym, qvol))
+        results.sort(key=lambda x: x[1], reverse=True)
+        return [s for s, _ in results]
 
     def get_volume_map(self, symbols: List[str]) -> dict:
         """Get 24h quote volume for given symbols. Returns {symbol: quoteVolume}."""

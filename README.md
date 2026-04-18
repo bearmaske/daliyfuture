@@ -8,7 +8,10 @@
 
 三层过滤 + 优先排序：
 
-1. **选币**：取成交量前 50 的 USDT 永续合约，排除稳定币对、股票/预上市类永续（TSLA/COIN/MSTR 等，`underlyingType=EQUITY/PREMARKET`）、市值前 10 的主流币（BTC/ETH/BNB/SOL/XRP/DOGE/ADA/TRX/TON/AVAX，可通过 `EXCLUDE_TOP10_SYMBOLS` 自定义）。候选还需满足 24h 成交额 ≥ `MIN_QUOTE_VOLUME_24H`（默认 $50M），规避薄流动性币种。
+1. **选币**：两个池子并集。
+   - **24h 池**：成交额前 50 的 USDT 永续（默认），排除稳定币对、股票/预上市类永续（TSLA/COIN/MSTR 等，`underlyingType=EQUITY/PREMARKET`）、市值前 10 的主流币（BTC/ETH/BNB/SOL/XRP/DOGE/ADA/TRX/TON/AVAX，可通过 `EXCLUDE_TOP10_SYMBOLS` 自定义）。候选需满足 24h 成交额 ≥ `MIN_QUOTE_VOLUME_24H`（默认 $50M）
+   - **1H 爆量池**（`ENABLE_1H_SPIKE_POOL=True`）：额外纳入那些**最近一根已闭合 1H 成交额 ≥ `MIN_1H_QUOTE_VOLUME`**（默认 $10M）的币种，即使它们不在 24h 前 50 里。目的是捕捉"爆涨暴跌"刚刚发生但 24h 均量还没跟上的币
+   - 扫描时并行拉取约 500 根 1H K 线（权重 ~500/2400，耗时 5–10 秒）
 2. **日线趋势判断**（可配置模式，`TREND_FILTER_MODE`）：
    - `sma`（默认）：SMA 斜率方向 + 价格位置 → 判断做多/做空/跳过
    - `bb_middle`：价格 > 日线布林中轨 → 只做多，< 中轨 → 只做空
@@ -180,7 +183,9 @@ dabao/
 | `TOP_SYMBOLS_COUNT` | 50 | 扫描成交量前 N 币种 |
 | `EXCLUDE_EQUITY_PERPS` | True | 跳过股票/预上市类永续（EQUITY / PREMARKET） |
 | `EXCLUDE_TOP10_SYMBOLS` | BTC/ETH/BNB/SOL/XRP/DOGE/ADA/TRX/TON/AVAX | 跳过市值前 10 主流币，自由编辑 |
-| `MIN_QUOTE_VOLUME_24H` | 50_000_000 | 24h 成交额下限（USDT），低于此值不参与扫描 |
+| `MIN_QUOTE_VOLUME_24H` | 50_000_000 | 24h 成交额下限（USDT），低于此值不进入 24h 池 |
+| `ENABLE_1H_SPIKE_POOL` | True | 是否启用 1H 爆量追加池 |
+| `MIN_1H_QUOTE_VOLUME` | 10_000_000 | 1H 爆量池下限（USDT），最近一根闭合 1H 成交额达到即纳入 |
 | `RISK_CHECK_INTERVAL_SECONDS` | 30 | 止损检查间隔（秒） |
 | `STRATEGY_START_TIME` | "2026-04-13 00:00:00" | 策略起始时间（UTC+8），用于心跳汇报显示运行时长 |
 
