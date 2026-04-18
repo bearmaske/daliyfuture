@@ -64,7 +64,7 @@ class Config:
 
     # Scheduling
     STRATEGY_INTERVAL_HOURS: int = 1
-    RISK_CHECK_INTERVAL_MINUTES: int = 1
+    RISK_CHECK_INTERVAL_SECONDS: int = 30
     HEARTBEAT_INTERVAL_HOURS: int = 6
 
     # Strategy inception date (UTC+8) — drives "运行时长" in heartbeat

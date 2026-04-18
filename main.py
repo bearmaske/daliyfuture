@@ -70,7 +70,7 @@ def main():
     scheduler.add_job(
         check_stop_loss,
         "interval",
-        minutes=config.RISK_CHECK_INTERVAL_MINUTES,
+        seconds=config.RISK_CHECK_INTERVAL_SECONDS,
         args=[exchange, state_mgr],
         id="risk",
         max_instances=1,
@@ -95,8 +95,8 @@ def main():
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
 
-    logger.info("[调度] 策略检查: 每小时 :01 | 止损监控: 每 %d 分钟 | 心跳: 每 %d 小时",
-                config.RISK_CHECK_INTERVAL_MINUTES, config.HEARTBEAT_INTERVAL_HOURS)
+    logger.info("[调度] 策略检查: 每小时 :01 | 止损监控: 每 %d 秒 | 心跳: 每 %d 小时",
+                config.RISK_CHECK_INTERVAL_SECONDS, config.HEARTBEAT_INTERVAL_HOURS)
     logger.info("=" * 60)
 
     notify("Bot 启动", f"[{mode_label}] 余额: ${state_mgr.balance:.2f} | 持仓: {state_mgr.position_count}")
