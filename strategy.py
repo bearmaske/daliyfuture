@@ -110,8 +110,19 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
     top_symbols = exchange.get_top_symbols()
     volume_map = exchange.get_volume_map(top_symbols)
     logger.info("=" * 60)
-    logger.info("[策略] 开始扫描 %d 个币种 | 余额: $%.2f | 持仓: %d/%d",
-                len(top_symbols), state_mgr.balance, state_mgr.position_count, config.MAX_POSITIONS)
+    logger.info("[策略] 开始扫描 %d 个币种 | 余额: $%.2f | 持仓: %d/%d | 过滤模式: %s | 波动率过滤: %s",
+                len(top_symbols), state_mgr.balance, state_mgr.position_count, config.MAX_POSITIONS,
+                config.TREND_FILTER_MODE, "ON" if config.VOL_FILTER_ENABLED else "OFF")
+
+    skip_counts = {
+        "已持仓": 0,
+        "日线数据不足": 0,
+        "无明确趋势": 0,
+        "小时线数据不足": 0,
+        "波动率收缩": 0,
+        "无突破": 0,
+        "异常": 0,
+    }
 
     # +2 for SMA slope comparison, +1 to discard unclosed candle
     daily_kline_limit = config.SMA_PERIOD + 3
@@ -125,6 +136,7 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
     for symbol in top_symbols:
         if state_mgr.get_position_by_symbol(symbol):
             logger.info("[跳过] %s | 原因: 已持仓", symbol)
+            skip_counts["已持仓"] += 1
             continue
 
         try:
@@ -139,13 +151,20 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
                 daily_closes = [float(k[4]) for k in daily_klines[:-1]]  # drop unclosed candle
                 if len(daily_closes) < config.SMA_PERIOD + 1:
                     logger.info("[跳过] %s | 原因: 日线数据不足 (%d/%d)", symbol, len(daily_closes), config.SMA_PERIOD + 1)
+                    skip_counts["日线数据不足"] += 1
                     continue
                 if mode == "sma":
                     trend = check_trend(daily_closes, config.SMA_PERIOD)
                 elif mode == "bb_middle":
                     trend = check_trend_bb_middle(daily_closes, config.SMA_PERIOD, config.BB_STD)
                 if trend is None:
-                    logger.info("[跳过] %s | 原因: 无明确趋势", symbol)
+                    # Extra context: show current vs SMA so we know why it's flat
+                    sma_now = float(np.mean(daily_closes[-config.SMA_PERIOD:]))
+                    sma_prev = float(np.mean(daily_closes[-config.SMA_PERIOD - 1:-1]))
+                    slope = "↑" if sma_now > sma_prev else ("↓" if sma_now < sma_prev else "→")
+                    rel = "↑" if daily_closes[-1] > sma_now else "↓"
+                    logger.info("[跳过] %s | 原因: 无明确趋势 (SMA斜率%s, 价格%sSMA)", symbol, slope, rel)
+                    skip_counts["无明确趋势"] += 1
                     continue
                 _, d_middle, _ = calculate_bollinger_bands(daily_closes, config.SMA_PERIOD, config.BB_STD)
 
@@ -155,16 +174,21 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
             hourly_closes = [float(k[4]) for k in hourly_klines[:-1]]  # drop unclosed candle
             if len(hourly_closes) < config.BB_PERIOD + 1:
                 logger.info("[跳过] %s | 原因: 小时线数据不足 (%d/%d)", symbol, len(hourly_closes), config.BB_PERIOD + 1)
+                skip_counts["小时线数据不足"] += 1
                 continue
 
+            s_atr = l_atr = 0.0
+            ratio = 0.0
             if config.VOL_FILTER_ENABLED:
                 closed_klines = hourly_klines[:-1]  # drop unclosed candle
                 expanding, s_atr, l_atr, ratio = check_volatility_expanding(
                     closed_klines, config.VOL_ATR_SHORT, config.VOL_ATR_LONG, config.VOL_ATR_THRESHOLD
                 )
                 if not expanding:
-                    logger.info("[跳过] %s | 原因: 波动率收缩 (ATR%d/ATR%d=%.2f < %.1f)",
-                                symbol, config.VOL_ATR_SHORT, config.VOL_ATR_LONG, ratio, config.VOL_ATR_THRESHOLD)
+                    logger.info("[跳过] %s | 原因: 波动率收缩 (ATR%d=%.6f / ATR%d=%.6f, 比值 %.2f < %.1f)",
+                                symbol, config.VOL_ATR_SHORT, s_atr,
+                                config.VOL_ATR_LONG, l_atr, ratio, config.VOL_ATR_THRESHOLD)
+                    skip_counts["波动率收缩"] += 1
                     continue
 
             h_upper, h_middle, h_lower = calculate_bollinger_bands(hourly_closes, config.BB_PERIOD, config.BB_STD)
@@ -189,12 +213,19 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
                     signal = False
 
             vol = volume_map.get(symbol, 0.0)
+            bb_width_pct = (h_upper - h_lower) / h_middle * 100 if h_middle else 0
+            close_to_upper_pct = (current_close - h_middle) / (h_upper - h_middle) * 100 if h_upper > h_middle else 0
+            signal_tag = ">>> 信号 <<<" if signal else "-"
             logger.info(
                 "[扫描] %s | 趋势: %s | 现价: %.4f | 日线中轨: %.4f | "
-                "1H收盘: %.4f | 上轨: %.4f | 下轨: %.4f | 24h量: %.0f | 信号: %s",
+                "1H收盘: %.4f | BB上/中/下: %.4f/%.4f/%.4f | 带宽 %.2f%% | 位置 %+.0f%% | "
+                "波动率比 %.2f | 24h量: $%.1fM | %s",
                 symbol, trend or "-", current_price, d_middle,
-                current_close, h_upper, h_lower, vol,
-                "YES" if signal else "-"
+                current_close, h_upper, h_middle, h_lower,
+                bb_width_pct, close_to_upper_pct,
+                ratio if config.VOL_FILTER_ENABLED else 0.0,
+                vol / 1e6,
+                signal_tag,
             )
 
             if signal:
@@ -204,9 +235,12 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
                     "price": current_price,
                     "volume": vol,
                 })
+            else:
+                skip_counts["无突破"] += 1
 
         except Exception as e:
             logger.error("[策略] %s 处理异常: %s", symbol, e)
+            skip_counts["异常"] += 1
             continue
 
     # Phase 2: sort signals by 24h quote volume descending, then open
@@ -228,6 +262,9 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
         _open_position(exchange, state_mgr, sig["symbol"], sig["trend"], sig["price"])
         opened += 1
 
+    skip_summary = " | ".join(f"{k} {v}" for k, v in skip_counts.items() if v > 0)
+    if skip_summary:
+        logger.info("[策略] 跳过汇总: %s", skip_summary)
     logger.info("[策略] 扫描完成 | 信号数: %d | 开仓: %d | 持仓: %d/%d | 余额: $%.2f",
                 len(signals), opened, state_mgr.position_count, config.MAX_POSITIONS, state_mgr.balance)
     logger.info("=" * 60)
@@ -270,6 +307,12 @@ def _open_position(
             open_order_id=open_order_id,
         )
         state_mgr.update_balance(-config.POSITION_SIZE)
+
+        logger.info(
+            "[开仓] %s %s | 入场 %.4f | 数量 %g | 名义 $%.2f | 保证金 $%.2f | 杠杆 %dx | orderId=%s | 余额 $%.2f",
+            symbol, side, current_price, quantity, notional,
+            config.POSITION_SIZE, config.LEVERAGE, open_order_id, state_mgr.balance,
+        )
 
         # Fetch funding rate info for notification
         funding_msg = ""

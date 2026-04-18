@@ -1,10 +1,44 @@
-import numpy as np
+from datetime import datetime, timezone, timedelta
 from typing import List
+
+import numpy as np
+from binance.client import Client
+
 from config import config
 from exchange import Exchange
 from state import StateManager
 from notifier import notify, logger
-from binance.client import Client
+
+TZ_CN = timezone(timedelta(hours=8))
+
+
+def _position_age(opened_at: str) -> str:
+    """Return human-readable age of a position, e.g. '3h12m' or '45m'."""
+    if not opened_at:
+        return "?"
+    fmts = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z")
+    dt = None
+    for f in fmts:
+        try:
+            dt = datetime.strptime(opened_at, f)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=TZ_CN)
+            break
+        except ValueError:
+            continue
+    if dt is None:
+        return "?"
+    seconds = int((datetime.now(TZ_CN) - dt).total_seconds())
+    if seconds < 0:
+        return "0m"
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes = rem // 60
+    if days > 0:
+        return f"{days}d{hours}h"
+    if hours > 0:
+        return f"{hours}h{minutes}m"
+    return f"{minutes}m"
 
 
 def calculate_pnl(side: str, entry_price: float, exit_price: float) -> float:
@@ -139,6 +173,8 @@ def check_stop_loss(exchange: Exchange, state_mgr: StateManager):
                 extreme_label = "最低"
                 extreme_price = pos["lowest_price"]
 
+            active_stop = "ATR" if stop_price == atr_stop else "兜底"
+
             triggered = should_stop_loss(
                 side=pos["side"],
                 highest_price=pos["highest_price"],
@@ -149,16 +185,22 @@ def check_stop_loss(exchange: Exchange, state_mgr: StateManager):
                 max_stop_pct=config.MAX_STOP_LOSS,
             )
 
-            status = "触发止损!" if triggered else "安全"
+            status = ">>> 触发止损 <<<" if triggered else "安全"
+
+            unrealized = calculate_pnl(pos["side"], pos["entry_price"], current_price)
+            unrealized_pct = unrealized / config.POSITION_SIZE * 100
+            age = _position_age(pos.get("opened_at"))
+            distance_pct = abs(current_price - stop_price) / current_price * 100
 
             logger.info(
-                "[止损] %s %s | 入场: %.4f | %s: %.4f | 现价: %.4f | "
-                "ATR: %.4f | 止损线: %.4f | %s: %.2f%% | %s",
-                pos["symbol"], pos["side"],
+                "[止损] %s %s | 持仓 %s | 入场: %.4f | %s: %.4f | 现价: %.4f | "
+                "PnL: $%+.2f (%+.1f%%) | ATR: %.4f | 止损线: %.4f (%s, 距 %.2f%%) | %s: %.2f%% | %s",
+                pos["symbol"], pos["side"], age,
                 pos["entry_price"],
                 extreme_label, extreme_price,
                 current_price,
-                atr, stop_price,
+                unrealized, unrealized_pct,
+                atr, stop_price, active_stop, distance_pct,
                 label, drawdown_pct,
                 status,
             )
@@ -204,6 +246,16 @@ def _close_position(
             opened_at=pos["opened_at"],
         )
         state_mgr.update_balance(config.POSITION_SIZE + raw_pnl)
+
+        pnl_pct = raw_pnl / config.POSITION_SIZE * 100
+        age = _position_age(pos.get("opened_at"))
+        logger.info(
+            "[平仓] %s %s (%s) | 持仓 %s | 入场 %.4f → 出场 %.4f | 数量 %g | "
+            "PnL $%+.2f (%+.1f%%) | orderId=%s | 余额 $%.2f",
+            pos["symbol"], pos["side"], reason, age,
+            pos["entry_price"], exit_price, pos["quantity"],
+            raw_pnl, pnl_pct, close_order_id, state_mgr.balance,
+        )
 
         notify(
             f"平仓 {pos['side']} ({reason})",

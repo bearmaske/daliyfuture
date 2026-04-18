@@ -91,29 +91,42 @@ class Exchange:
         if skipped_top10:
             logger.info("[扫描] 跳过市值前10: %s", ", ".join(skipped_top10))
 
+        logger.info("[扫描] 全网 USDT 永续: %d | 去稳定币/股票/Top10 后候选: %d",
+                    sum(1 for t in tickers if t["symbol"].endswith("USDT")), len(eligible))
+
         # Pool A: top N by 24h volume (with 24h floor)
         pool_a = [t for t in eligible if float(t.get("quoteVolume", 0)) >= min_vol]
         pool_a.sort(key=lambda x: float(x["quoteVolume"]), reverse=True)
         pool_a_syms = [t["symbol"] for t in pool_a[:limit]]
-        logger.info("[扫描] 24h 池: %d 个 (≥ $%.0fM)", len(pool_a_syms), min_vol / 1e6)
+        below_floor = len(eligible) - len(pool_a)
+        if pool_a_syms:
+            top_vol = float(pool_a[0]["quoteVolume"]) / 1e6
+            last_vol = float(pool_a[min(limit, len(pool_a)) - 1]["quoteVolume"]) / 1e6
+            logger.info("[扫描] 24h 池: %d 个 (≥ $%.0fM, 最高 $%.1fM / 末位 $%.1fM, 另有 %d 个未过线)",
+                        len(pool_a_syms), min_vol / 1e6, top_vol, last_vol, below_floor)
 
         if not config.ENABLE_1H_SPIKE_POOL:
             return pool_a_syms
 
         # Pool B: 1H spike. Fetch last-closed 1H volume for every eligible symbol.
-        spike_syms = self._scan_1h_spikes(
+        t_start = time.time()
+        spike_items = self._scan_1h_spikes(
             [t["symbol"] for t in eligible], config.MIN_1H_QUOTE_VOLUME
         )
-        # Sort spike additions by their own 1H volume desc for deterministic order
-        extras = [s for s in spike_syms if s not in pool_a_syms]
-        if extras:
-            logger.info("[扫描] 1H 爆量池(追加): %d 个 (≥ $%.0fM): %s",
-                        len(extras), config.MIN_1H_QUOTE_VOLUME / 1e6, ", ".join(extras))
-        return pool_a_syms + extras
+        elapsed = time.time() - t_start
+        logger.info("[扫描] 1H 爆量扫描: 拉取 %d 根 K 线，耗时 %.1fs | 命中 %d 个 (≥ $%.0fM)",
+                    len(eligible), elapsed, len(spike_items), config.MIN_1H_QUOTE_VOLUME / 1e6)
 
-    def _scan_1h_spikes(self, symbols: List[str], min_qvol: float) -> List[str]:
+        # Sort spike additions by their own 1H volume desc for deterministic order
+        extras = [(s, v) for s, v in spike_items if s not in pool_a_syms]
+        if extras:
+            detail = ", ".join(f"{s}(${v/1e6:.1f}M)" for s, v in extras)
+            logger.info("[扫描] 1H 爆量追加(非 24h 池): %d 个 | %s", len(extras), detail)
+        return pool_a_syms + [s for s, _ in extras]
+
+    def _scan_1h_spikes(self, symbols: List[str], min_qvol: float) -> List[tuple]:
         """Fetch last-closed 1H quote volume for each symbol in parallel.
-        Returns symbols whose 1H quote volume >= min_qvol, sorted desc."""
+        Returns [(symbol, quote_volume), ...] whose 1H quote volume >= min_qvol, sorted desc."""
         def _fetch(sym):
             try:
                 kl = self.data_client.futures_klines(symbol=sym, interval="1h", limit=2)
@@ -130,7 +143,7 @@ class Exchange:
                 if qvol >= min_qvol:
                     results.append((sym, qvol))
         results.sort(key=lambda x: x[1], reverse=True)
-        return [s for s, _ in results]
+        return results
 
     def get_volume_map(self, symbols: List[str]) -> dict:
         """Get 24h quote volume for given symbols. Returns {symbol: quoteVolume}."""
