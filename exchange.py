@@ -41,12 +41,20 @@ class Exchange:
         """Get top N USDT perpetual futures by quote volume."""
         limit = limit or config.TOP_SYMBOLS_COUNT
         tickers = self._retry(lambda: self.data_client.futures_ticker())
-        # Filter USDT pairs, exclude stablecoins
-        usdt_tickers = [
-            t for t in tickers
-            if t["symbol"].endswith("USDT")
-            and t["symbol"] not in config.STABLECOIN_FILTER
-        ]
+        # Filter USDT pairs, exclude stablecoins, exclude non-ASCII
+        # (python-binance mis-encodes non-ASCII symbols → APIError -1022 signature mismatch)
+        skipped_non_ascii = []
+        usdt_tickers = []
+        for t in tickers:
+            sym = t["symbol"]
+            if not sym.endswith("USDT") or sym in config.STABLECOIN_FILTER:
+                continue
+            if not sym.isascii():
+                skipped_non_ascii.append(sym)
+                continue
+            usdt_tickers.append(t)
+        if skipped_non_ascii:
+            logger.info("[扫描] 跳过非ASCII符号: %s", ", ".join(skipped_non_ascii))
         # Sort by quote asset volume descending
         usdt_tickers.sort(key=lambda x: float(x["quoteVolume"]), reverse=True)
         return [t["symbol"] for t in usdt_tickers[:limit]]
