@@ -1,9 +1,24 @@
 import math
 import time
 from typing import Optional, List
+from urllib.parse import urlencode
 from binance.client import Client
 from notifier import logger
 from config import config
+
+
+# python-binance 1.0.19 signs the raw Python string `a=v1&b=v2`, but `requests`
+# sends the body URL-encoded. For ASCII this is identical; for non-ASCII
+# symbols (e.g. 币安人生USDT) the server's signature differs → APIError -1022.
+# Re-sign using urlencode so the signed string matches the wire body.
+def _urlencoded_generate_signature(self, data):
+    sig_func = self._hmac_signature
+    if getattr(self, "PRIVATE_KEY", None):
+        sig_func = self._rsa_signature
+    return sig_func(urlencode(self._order_params(data)))
+
+
+Client._generate_signature = _urlencoded_generate_signature
 
 
 class Exchange:
@@ -41,20 +56,12 @@ class Exchange:
         """Get top N USDT perpetual futures by quote volume."""
         limit = limit or config.TOP_SYMBOLS_COUNT
         tickers = self._retry(lambda: self.data_client.futures_ticker())
-        # Filter USDT pairs, exclude stablecoins, exclude non-ASCII
-        # (python-binance mis-encodes non-ASCII symbols → APIError -1022 signature mismatch)
-        skipped_non_ascii = []
-        usdt_tickers = []
-        for t in tickers:
-            sym = t["symbol"]
-            if not sym.endswith("USDT") or sym in config.STABLECOIN_FILTER:
-                continue
-            if not sym.isascii():
-                skipped_non_ascii.append(sym)
-                continue
-            usdt_tickers.append(t)
-        if skipped_non_ascii:
-            logger.info("[扫描] 跳过非ASCII符号: %s", ", ".join(skipped_non_ascii))
+        # Filter USDT pairs, exclude stablecoins
+        usdt_tickers = [
+            t for t in tickers
+            if t["symbol"].endswith("USDT")
+            and t["symbol"] not in config.STABLECOIN_FILTER
+        ]
         # Sort by quote asset volume descending
         usdt_tickers.sort(key=lambda x: float(x["quoteVolume"]), reverse=True)
         return [t["symbol"] for t in usdt_tickers[:limit]]
