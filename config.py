@@ -61,6 +61,9 @@ class Config:
     RISK_CHECK_INTERVAL_MINUTES: int = 1
     HEARTBEAT_INTERVAL_HOURS: int = 6
 
+    # Strategy inception date (UTC+8) — drives "运行时长" in heartbeat
+    STRATEGY_START_TIME: str = "2026-04-13 00:00:00"
+
     # Files
     STATE_FILE: str = "state.json"
     STATE_BACKUP_FILE: str = "state.backup.json"

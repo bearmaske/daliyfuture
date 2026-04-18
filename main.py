@@ -4,7 +4,7 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.events import EVENT_JOB_ERROR
 from config import config
 from exchange import Exchange
-from state import StateManager
+from state import StateManager, get_runtime
 from strategy import run_strategy
 from risk import check_stop_loss, calculate_pnl
 from notifier import notify, logger
@@ -46,7 +46,7 @@ def main():
         logger.warning("[同步] 同步失败，使用本地数据: %s", e)
 
     logger.info("[状态] 余额: $%.2f | 当前持仓: %d | 运行时长: %s",
-                state_mgr.balance, state_mgr.position_count, state_mgr.get_runtime())
+                state_mgr.balance, state_mgr.position_count, get_runtime())
 
     scheduler = BlockingScheduler()
 
@@ -191,7 +191,7 @@ def _heartbeat(exchange: Exchange, state_mgr: StateManager):
 
     mode_label = "实盘" if config.is_live else "模拟盘"
     lines.append(f"--- 交易统计 ({mode_label}) ---")
-    lines.append(f"运行时长: {state_mgr.get_runtime()} (自 {state_mgr.state.get('started_at', '?')})")
+    lines.append(f"运行时长: {get_runtime()} (自 {config.STRATEGY_START_TIME})")
     lines.append(f"持仓: {len(positions)}/{config.MAX_POSITIONS}")
     lines.append(f"已平仓: {len(history)} 笔 | 胜率: {win_rate:.0f}% ({win_count}胜/{lose_count}负)")
     closed_pnl_sign = "+" if total_closed_pnl >= 0 else ""

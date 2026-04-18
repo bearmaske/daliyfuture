@@ -6,12 +6,35 @@ import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
+from config import config
+
 TZ_CN = timezone(timedelta(hours=8))
 
 
 def now_cn() -> str:
     """Return current time in UTC+8, formatted as YYYY-MM-DD HH:MM:SS."""
     return datetime.now(TZ_CN).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def get_runtime() -> str:
+    """Return strategy runtime as 'X天Y小时Z分钟' since config.STRATEGY_START_TIME."""
+    try:
+        started_at = datetime.strptime(
+            config.STRATEGY_START_TIME, "%Y-%m-%d %H:%M:%S"
+        ).replace(tzinfo=TZ_CN)
+    except (ValueError, AttributeError):
+        return "未知"
+    total_seconds = int((datetime.now(TZ_CN) - started_at).total_seconds())
+    if total_seconds < 0:
+        return "未开始"
+    days, remainder = divmod(total_seconds, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes = remainder // 60
+    if days > 0:
+        return f"{days}天{hours}小时{minutes}分钟"
+    if hours > 0:
+        return f"{hours}小时{minutes}分钟"
+    return f"{minutes}分钟"
 
 
 class StateManager:
@@ -23,7 +46,6 @@ class StateManager:
         self.state = None
 
     def load(self) -> dict:
-        needs_save = False
         with self._lock:
             if os.path.exists(self.state_file):
                 try:
@@ -37,13 +59,7 @@ class StateManager:
                         self.state = self._default_state()
             else:
                 self.state = self._default_state()
-            # Backfill started_at for pre-existing state files
-            if not self.state.get("started_at"):
-                self.state["started_at"] = now_cn()
-                needs_save = True
-        if needs_save:
-            self.save()
-        return self.state
+            return self.state
 
     def save(self):
         with self._lock:
@@ -237,32 +253,9 @@ class StateManager:
         self.save()
         return added, removed
 
-    def get_runtime(self) -> str:
-        """Return strategy runtime as 'X天Y小时Z分钟' since started_at."""
-        started_str = self.state.get("started_at")
-        if not started_str:
-            return "未知"
-        try:
-            started_at = datetime.strptime(started_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=TZ_CN)
-        except ValueError:
-            return "未知"
-        elapsed = datetime.now(TZ_CN) - started_at
-        total_seconds = int(elapsed.total_seconds())
-        if total_seconds < 0:
-            return "未知"
-        days, remainder = divmod(total_seconds, 86400)
-        hours, remainder = divmod(remainder, 3600)
-        minutes = remainder // 60
-        if days > 0:
-            return f"{days}天{hours}小时{minutes}分钟"
-        if hours > 0:
-            return f"{hours}小时{minutes}分钟"
-        return f"{minutes}分钟"
-
     def _default_state(self) -> dict:
         return {
             "balance": self.initial_capital,
             "positions": [],
             "trade_history": [],
-            "started_at": now_cn(),
         }
