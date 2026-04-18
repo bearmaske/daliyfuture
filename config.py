@@ -59,6 +59,8 @@ class Config:
     EXCLUDE_EQUITY_PERPS: bool = True
     # Skip crypto majors (too efficient, edge is in mid-cap momentum). Edit freely.
     EXCLUDE_TOP10_SYMBOLS: list = None
+    # Minimum 24h quote volume (USDT). Protects against thin-liquidity coins.
+    MIN_QUOTE_VOLUME_24H: float = 50_000_000.0
 
     # Scheduling
     STRATEGY_INTERVAL_HOURS: int = 1

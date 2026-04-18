@@ -60,7 +60,8 @@ class Exchange:
         tickers = self._retry(lambda: self.data_client.futures_ticker())
         top10_set = set(config.EXCLUDE_TOP10_SYMBOLS or [])
         excluded_equity = config.EXCLUDE_EQUITY_PERPS
-        skipped_equity, skipped_top10 = [], []
+        min_vol = config.MIN_QUOTE_VOLUME_24H
+        skipped_equity, skipped_top10, skipped_low_vol = [], [], 0
         usdt_tickers = []
         for t in tickers:
             sym = t["symbol"]
@@ -72,11 +73,16 @@ class Exchange:
             if sym in top10_set:
                 skipped_top10.append(sym)
                 continue
+            if float(t.get("quoteVolume", 0)) < min_vol:
+                skipped_low_vol += 1
+                continue
             usdt_tickers.append(t)
         if skipped_equity:
             logger.info("[扫描] 跳过股票/预上市: %s", ", ".join(skipped_equity))
         if skipped_top10:
             logger.info("[扫描] 跳过市值前10: %s", ", ".join(skipped_top10))
+        if skipped_low_vol:
+            logger.info("[扫描] 跳过成交额 < $%.0fM: %d 个", min_vol / 1e6, skipped_low_vol)
         usdt_tickers.sort(key=lambda x: float(x["quoteVolume"]), reverse=True)
         return [t["symbol"] for t in usdt_tickers[:limit]]
 
