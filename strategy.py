@@ -299,18 +299,29 @@ def _open_position(
         # (trade fills have propagation delay on Binance, not available immediately)
         open_order_id = order.get("orderId")
 
+        # Use Binance-reported fill price and executed qty — market orders can
+        # slip from the pre-trade ticker, and recording the ticker here caused
+        # PnL reports to diverge from actual account PnL.
+        fill_price, executed_qty = exchange.get_order_fill(symbol, open_order_id, current_price)
+        if executed_qty <= 0:
+            executed_qty = quantity
+        slippage_pct = (fill_price - current_price) / current_price * 100 if current_price else 0
+
         state_mgr.add_position(
             symbol=symbol,
             side=side,
-            entry_price=current_price,
-            quantity=quantity,
+            entry_price=fill_price,
+            quantity=executed_qty,
             open_order_id=open_order_id,
         )
         state_mgr.update_balance(-config.POSITION_SIZE)
 
+        actual_notional = fill_price * executed_qty
         logger.info(
-            "[开仓] %s %s | 入场 %.4f | 数量 %g | 名义 $%.2f | 保证金 $%.2f | 杠杆 %dx | orderId=%s | 余额 $%.2f",
-            symbol, side, current_price, quantity, notional,
+            "[开仓] %s %s | 信号价 %.4f → 成交价 %.4f (滑点 %+.3f%%) | 目标量 %g → 实际量 %g | "
+            "实际名义 $%.2f | 保证金 $%.2f | 杠杆 %dx | orderId=%s | 余额 $%.2f",
+            symbol, side, current_price, fill_price, slippage_pct,
+            quantity, executed_qty, actual_notional,
             config.POSITION_SIZE, config.LEVERAGE, open_order_id, state_mgr.balance,
         )
 
@@ -330,7 +341,7 @@ def _open_position(
 
         notify(
             f"开仓 {side}",
-            f"{symbol} | 价格 {current_price:.4f} | 数量 {quantity} | "
+            f"{symbol} | 成交价 {fill_price:.4f} | 数量 {executed_qty:g} | "
             f"保证金 ${config.POSITION_SIZE}{funding_msg}",
         )
     except Exception as e:

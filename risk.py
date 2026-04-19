@@ -41,12 +41,18 @@ def _position_age(opened_at: str) -> str:
     return f"{minutes}m"
 
 
-def calculate_pnl(side: str, entry_price: float, exit_price: float) -> float:
-    """Calculate PnL for a position."""
+def calculate_pnl(side: str, entry_price: float, exit_price: float, quantity: float = None) -> float:
+    """Calculate PnL. When quantity is given, uses qty × (exit − entry) which
+    matches Binance's exchange-side accounting. Without quantity, falls back to
+    the notional formula (used for open-position unrealized previews where the
+    displayed quantity hasn't been reconciled yet)."""
+    if quantity is not None and quantity > 0:
+        if side == "LONG":
+            return (exit_price - entry_price) * quantity
+        return (entry_price - exit_price) * quantity
     if side == "LONG":
         return (exit_price - entry_price) / entry_price * config.POSITION_SIZE * config.LEVERAGE
-    else:
-        return (entry_price - exit_price) / entry_price * config.POSITION_SIZE * config.LEVERAGE
+    return (entry_price - exit_price) / entry_price * config.POSITION_SIZE * config.LEVERAGE
 
 
 def calculate_atr(klines: list, period: int = 14) -> float:
@@ -187,7 +193,7 @@ def check_stop_loss(exchange: Exchange, state_mgr: StateManager):
 
             status = ">>> 触发止损 <<<" if triggered else "安全"
 
-            unrealized = calculate_pnl(pos["side"], pos["entry_price"], current_price)
+            unrealized = calculate_pnl(pos["side"], pos["entry_price"], current_price, pos.get("quantity"))
             unrealized_pct = unrealized / config.POSITION_SIZE * 100
             age = _position_age(pos.get("opened_at"))
             distance_pct = abs(current_price - stop_price) / current_price * 100
@@ -225,20 +231,26 @@ def _close_position(
     try:
         order = exchange.place_order(pos["symbol"], close_side, pos["quantity"], position_side=pos["side"])
 
-        raw_pnl = calculate_pnl(pos["side"], pos["entry_price"], exit_price)
-
         # Store order IDs; commission will be backfilled by heartbeat
         # (Binance trade fills have propagation delay, not available immediately)
         open_order_id = pos.get("open_order_id")
         close_order_id = order.get("orderId")
+
+        # Use actual fill price and executed qty to match exchange PnL.
+        actual_exit, executed_qty = exchange.get_order_fill(pos["symbol"], close_order_id, exit_price)
+        if executed_qty <= 0:
+            executed_qty = pos["quantity"]
+        slippage_pct = (actual_exit - exit_price) / exit_price * 100 if exit_price else 0
+
+        raw_pnl = calculate_pnl(pos["side"], pos["entry_price"], actual_exit, executed_qty)
 
         state_mgr.remove_position(pos["id"])
         state_mgr.add_trade_history(
             symbol=pos["symbol"],
             side=pos["side"],
             entry_price=pos["entry_price"],
-            exit_price=exit_price,
-            quantity=pos["quantity"],
+            exit_price=actual_exit,
+            quantity=executed_qty,
             pnl=raw_pnl,
             commission=None,
             open_order_id=open_order_id,
@@ -250,17 +262,17 @@ def _close_position(
         pnl_pct = raw_pnl / config.POSITION_SIZE * 100
         age = _position_age(pos.get("opened_at"))
         logger.info(
-            "[平仓] %s %s (%s) | 持仓 %s | 入场 %.4f → 出场 %.4f | 数量 %g | "
-            "PnL $%+.2f (%+.1f%%) | orderId=%s | 余额 $%.2f",
+            "[平仓] %s %s (%s) | 持仓 %s | 入场 %.4f → 信号价 %.4f → 成交价 %.4f (滑点 %+.3f%%) | "
+            "数量 %g | PnL $%+.2f (%+.1f%%) | orderId=%s | 余额 $%.2f",
             pos["symbol"], pos["side"], reason, age,
-            pos["entry_price"], exit_price, pos["quantity"],
-            raw_pnl, pnl_pct, close_order_id, state_mgr.balance,
+            pos["entry_price"], exit_price, actual_exit, slippage_pct,
+            executed_qty, raw_pnl, pnl_pct, close_order_id, state_mgr.balance,
         )
 
         notify(
             f"平仓 {pos['side']} ({reason})",
-            f"{pos['symbol']} | 入场 {pos['entry_price']:.4f} | 出场 {exit_price:.4f} | "
-            f"PnL ${raw_pnl:.2f} (手续费待结算)",
+            f"{pos['symbol']} | 入场 {pos['entry_price']:.4f} | 出场 {actual_exit:.4f} | "
+            f"数量 {executed_qty:g} | PnL ${raw_pnl:.2f} (手续费待结算)",
         )
     except Exception as e:
         logger.error(f"Failed to close {pos['symbol']}: {e}")

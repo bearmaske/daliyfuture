@@ -232,6 +232,45 @@ class Exchange:
             lambda: self.trading_client.futures_create_order(**params)
         )
 
+    def get_order_fill(self, symbol: str, order_id: int, fallback_price: float) -> tuple:
+        """Return (avg_fill_price, executed_qty) for a filled order.
+
+        Reads `avgPrice`/`executedQty` from the order response. For MARKET orders
+        Binance fills synchronously, but `avgPrice` occasionally comes back as "0"
+        when the response is returned before the fill is fully aggregated — in
+        that case we query the order and, failing that, reconstruct from userTrades.
+        `fallback_price` is used as last-resort entry price (pre-trade ticker).
+        """
+        def _parse(resp):
+            try:
+                ap = float(resp.get("avgPrice") or 0)
+                eq = float(resp.get("executedQty") or 0)
+            except (TypeError, ValueError):
+                ap, eq = 0.0, 0.0
+            return ap, eq
+
+        try:
+            resp = self._retry(lambda: self.trading_client.futures_get_order(
+                symbol=symbol, orderId=order_id))
+            ap, eq = _parse(resp)
+            if ap > 0 and eq > 0:
+                return ap, eq
+        except Exception as e:
+            logger.warning("[成交价] get_order 失败 %s#%s: %s", symbol, order_id, e)
+
+        try:
+            trades = self._retry(lambda: self.trading_client.futures_account_trades(
+                symbol=symbol, orderId=order_id))
+            if trades:
+                total_qty = sum(float(t["qty"]) for t in trades)
+                total_quote = sum(float(t["quoteQty"]) for t in trades)
+                if total_qty > 0:
+                    return total_quote / total_qty, total_qty
+        except Exception as e:
+            logger.warning("[成交价] userTrades 失败 %s#%s: %s", symbol, order_id, e)
+
+        return fallback_price, 0.0
+
     def _is_hedge_mode(self) -> bool:
         """Check if account is in hedge mode (dual position side)."""
         if not hasattr(self, '_hedge_mode'):

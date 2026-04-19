@@ -214,7 +214,7 @@ def _heartbeat(exchange: Exchange, state_mgr: StateManager):
         for pos in positions:
             try:
                 current_price = exchange.get_price(pos["symbol"])
-                pnl = calculate_pnl(pos["side"], pos["entry_price"], current_price)
+                pnl = calculate_pnl(pos["side"], pos["entry_price"], current_price, pos.get("quantity"))
                 pnl_pct = pnl / config.POSITION_SIZE * 100
                 sign = "+" if pnl >= 0 else ""
                 lines.append(
