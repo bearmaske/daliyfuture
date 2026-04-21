@@ -1,4 +1,9 @@
-"""Backtest engine: simulates the Trend Sniper strategy on historical data."""
+"""Backtest engine: simulates the Trend Sniper strategy on historical data.
+
+When minute data is provided (`minute_df`), stop-loss checks run at a
+configurable minute cadence (1m / 2m / ...) and use intrabar high/low so spikes
+trigger correctly. Entry signals still evaluate on closed 1H bars.
+Without minute data, stops fall back to 1H close-only checks."""
 import os
 import sys
 from dataclasses import dataclass, field
@@ -27,6 +32,7 @@ class BacktestPosition:
     entry_price: float
     quantity: float
     opened_at: str
+    opened_ms: int = 0
     highest_price: float = 0.0
     lowest_price: float = 0.0
 
@@ -79,6 +85,7 @@ class BacktestEngine:
         atr_period: int = 14,
         atr_multiplier: float = 2.0,
         max_stop_pct: float = 0.06,
+        stop_check_minutes: int = 60,
     ):
         self.initial_capital = initial_capital
         self.balance = initial_capital
@@ -91,36 +98,63 @@ class BacktestEngine:
         self.atr_period = atr_period
         self.atr_multiplier = atr_multiplier
         self.max_stop_pct = max_stop_pct
+        self.stop_check_minutes = stop_check_minutes
 
         self.positions: list[BacktestPosition] = []
         self.trades: list[BacktestTrade] = []
         self.equity_curve: list[dict] = []
 
+        # Minute data + ATR cache: minute-level stop cadence
+        self._minute_data: dict[str, pd.DataFrame] = {}
+        self._hourly_data: dict[str, pd.DataFrame] = {}
+        self._atr_cache: dict[tuple[str, int], float] = {}
+
     def run(
-        self, data: dict[str, tuple[pd.DataFrame, pd.DataFrame]]
+        self, data: dict[str, tuple[pd.DataFrame, pd.DataFrame]],
+        minute_data: dict[str, pd.DataFrame] | None = None,
     ) -> tuple[list[BacktestTrade], list[dict]]:
         """Run backtest over all symbols.
 
         Args:
             data: {symbol: (hourly_df, daily_df)} where each df has columns:
                   open_time, open, high, low, close, volume
+            minute_data: optional {symbol: minute_df} for intra-hour stop checks
 
         Returns:
             (trades, equity_curve)
         """
-        all_timestamps = set()
+        self._minute_data = minute_data or {}
+        self._hourly_data = {sym: h for sym, (h, _) in data.items()}
+
+        # Hourly timeline drives entries. Within each hour, stop checks step
+        # through minute bars at `stop_check_minutes` stride.
+        all_hourly_ts = set()
         for symbol, (hourly_df, _) in data.items():
-            all_timestamps.update(hourly_df["open_time"].tolist())
-        timeline = sorted(all_timestamps)
+            all_hourly_ts.update(hourly_df["open_time"].tolist())
+        hourly_timeline = sorted(all_hourly_ts)
 
         min_hourly_bars = self.bb_period + 1
         min_daily_bars = self.sma_period + 1
+        HOUR_MS = 3600_000
+        MIN_MS = 60_000
 
-        for ts in timeline:
-            # 1. Check stop loss for all open positions
-            self._check_stops(ts, data)
+        for ts in hourly_timeline:
+            # 1. Intrabar stop-loss checks across the preceding hour
+            # Run on the minute grid [ts, ts+HOUR_MS) at the configured stride.
+            if self._minute_data and self.positions:
+                stride_ms = self.stop_check_minutes * MIN_MS
+                minute_cursor = ts
+                end_of_hour = ts + HOUR_MS
+                while minute_cursor < end_of_hour:
+                    self._check_stops_minute(minute_cursor)
+                    if not self.positions:
+                        break
+                    minute_cursor += stride_ms
 
-            # 2. Check entry signals for each symbol
+            # 2. Hourly close — run close-only stop for symbols missing minute data
+            self._check_stops_hour(ts, data)
+
+            # 3. Check entry signals for each symbol
             if len(self.positions) < self.max_positions and self.balance >= self.position_size:
                 for symbol, (hourly_df, daily_df) in data.items():
                     if len(self.positions) >= self.max_positions:
@@ -131,12 +165,12 @@ class BacktestEngine:
                         continue
                     self._check_signal(symbol, ts, hourly_df, daily_df, min_hourly_bars, min_daily_bars)
 
-            # 3. Record equity
+            # 4. Record equity
             equity = self._calc_equity(ts, data)
             self.equity_curve.append({"timestamp": ts, "equity": equity})
 
         # Close any remaining positions at last available price
-        self._close_remaining(timeline[-1] if timeline else 0, data)
+        self._close_remaining(hourly_timeline[-1] if hourly_timeline else 0, data)
 
         return self.trades, self.equity_curve
 
@@ -150,13 +184,11 @@ class BacktestEngine:
         min_daily: int,
     ):
         """Check for entry signal at current timestamp."""
-        # Get hourly bars up to (not including) current bar — use closed bars only
         h_mask = hourly_df["open_time"] < current_ts
         h_closed = hourly_df[h_mask]
         if len(h_closed) < min_hourly:
             return
 
-        # Daily bar is closed when open_time + 86400000ms <= current_ts
         day_ms = 86400000
         d_mask = (daily_df["open_time"] + day_ms) <= current_ts
         d_closed = daily_df[d_mask]
@@ -166,7 +198,6 @@ class BacktestEngine:
         daily_closes = d_closed["close"].tolist()
         hourly_closes = h_closed["close"].tolist()
 
-        # 1. Check daily trend if enabled
         trend = None
         mode = config.TREND_FILTER_MODE
         if mode != "disabled":
@@ -177,7 +208,6 @@ class BacktestEngine:
             if trend is None:
                 return
 
-        # 2. Check volatility filter (ATR expansion)
         if config.VOL_FILTER_ENABLED:
             h_arr = h_closed[["open_time", "open", "high", "low", "close", "volume"]].values
             expanding, _, _, _ = check_volatility_expanding(
@@ -186,7 +216,6 @@ class BacktestEngine:
             if not expanding:
                 return
 
-        # 3. Check hourly Bollinger Band breakout
         upper, middle, lower = calculate_bollinger_bands(
             hourly_closes, self.bb_period, self.bb_std
         )
@@ -209,7 +238,6 @@ class BacktestEngine:
         if not signal:
             return
 
-        # 3. Execute at current bar's open price (next bar after signal)
         current_bar = hourly_df[hourly_df["open_time"] == current_ts]
         if current_bar.empty:
             return
@@ -228,37 +256,58 @@ class BacktestEngine:
             entry_price=exec_price,
             quantity=quantity,
             opened_at=ts_str,
+            opened_ms=current_ts,
         )
         self.positions.append(pos)
         self.balance -= self.position_size
         self.balance -= fee
 
-    def _check_stops(self, current_ts: int, data: dict):
-        """Check ATR trailing stop for all open positions."""
+    def _get_atr_at_hour(self, symbol: str, hour_ts: int, hourly_df: pd.DataFrame) -> float:
+        """Cached ATR at start of a given hour (uses last closed hourly bars)."""
+        key = (symbol, hour_ts)
+        if key in self._atr_cache:
+            return self._atr_cache[key]
+        h_closed = hourly_df[hourly_df["open_time"] < hour_ts]
+        if len(h_closed) < self.atr_period + 1:
+            self._atr_cache[key] = 0.0
+            return 0.0
+        kline_list = h_closed.tail(self.atr_period + 2).values.tolist()
+        atr = calculate_atr(kline_list, self.atr_period)
+        self._atr_cache[key] = atr
+        return atr
+
+    def _check_stops_minute(self, minute_ts: int):
+        """Stop check at a polling tick. Matches production: bot only sees the
+        live price at each poll, so we use the minute bar's close as the sample
+        and trigger on that. A longer stride (2m/3m) means some intervening
+        price spikes are invisible — exactly the blind spot being benchmarked.
+        """
+        HOUR_MS = 3600_000
         to_close = []
-
         for pos in self.positions:
-            if pos.symbol not in data:
+            if pos.symbol not in self._minute_data:
                 continue
-            hourly_df, _ = data[pos.symbol]
-
-            current_bar = hourly_df[hourly_df["open_time"] == current_ts]
-            if current_bar.empty:
+            if minute_ts <= pos.opened_ms:
                 continue
 
-            current_price = float(current_bar.iloc[0]["close"])
+            mdf = self._minute_data[pos.symbol]
+            bar = mdf[mdf["open_time"] == minute_ts]
+            if bar.empty:
+                continue
+            current_price = float(bar.iloc[0]["close"])
 
             if current_price > pos.highest_price:
                 pos.highest_price = current_price
             if current_price < pos.lowest_price:
                 pos.lowest_price = current_price
 
-            h_closed = hourly_df[hourly_df["open_time"] <= current_ts]
-            if len(h_closed) < self.atr_period + 1:
+            hour_ts = (minute_ts // HOUR_MS) * HOUR_MS
+            hourly_df = self._hourly_data.get(pos.symbol)
+            if hourly_df is None:
                 continue
-
-            kline_list = h_closed.tail(self.atr_period + 2).values.tolist()
-            atr = calculate_atr(kline_list, self.atr_period)
+            atr = self._get_atr_at_hour(pos.symbol, hour_ts, hourly_df)
+            if atr <= 0:
+                continue
 
             triggered = should_stop_loss(
                 side=pos.side,
@@ -269,11 +318,8 @@ class BacktestEngine:
                 atr_multiplier=self.atr_multiplier,
                 max_stop_pct=self.max_stop_pct,
             )
-
             if triggered:
-                exit_price = apply_slippage(current_price, pos.side, is_entry=False)
                 exit_reason = "atr_stop"
-
                 if pos.side == "LONG":
                     hard_stop = pos.highest_price * (1 - self.max_stop_pct)
                     if current_price <= hard_stop:
@@ -282,11 +328,58 @@ class BacktestEngine:
                     hard_stop = pos.lowest_price * (1 + self.max_stop_pct)
                     if current_price >= hard_stop:
                         exit_reason = "hard_stop"
+                exit_price = apply_slippage(current_price, pos.side, is_entry=False)
+                to_close.append((pos, exit_price, exit_reason, minute_ts))
 
+        for pos, exit_price, reason, ts in to_close:
+            self._close_position(pos, exit_price, reason, ts)
+
+    def _check_stops_hour(self, current_ts: int, data: dict):
+        """Hourly-close fallback for symbols without minute data."""
+        to_close = []
+        for pos in self.positions:
+            if pos.symbol in self._minute_data:
+                continue  # handled on minute grid
+            if pos.symbol not in data:
+                continue
+            hourly_df, _ = data[pos.symbol]
+            bar = hourly_df[hourly_df["open_time"] == current_ts]
+            if bar.empty:
+                continue
+            current_price = float(bar.iloc[0]["close"])
+            if current_price > pos.highest_price:
+                pos.highest_price = current_price
+            if current_price < pos.lowest_price:
+                pos.lowest_price = current_price
+
+            atr = self._get_atr_at_hour(pos.symbol, current_ts, hourly_df)
+            if atr <= 0:
+                continue
+
+            triggered = should_stop_loss(
+                side=pos.side,
+                highest_price=pos.highest_price,
+                lowest_price=pos.lowest_price,
+                current_price=current_price,
+                atr=atr,
+                atr_multiplier=self.atr_multiplier,
+                max_stop_pct=self.max_stop_pct,
+            )
+            if triggered:
+                exit_price = apply_slippage(current_price, pos.side, is_entry=False)
+                exit_reason = "atr_stop"
+                if pos.side == "LONG":
+                    hard_stop = pos.highest_price * (1 - self.max_stop_pct)
+                    if current_price <= hard_stop:
+                        exit_reason = "hard_stop"
+                else:
+                    hard_stop = pos.lowest_price * (1 + self.max_stop_pct)
+                    if current_price >= hard_stop:
+                        exit_reason = "hard_stop"
                 to_close.append((pos, exit_price, exit_reason, current_ts))
 
-        for pos, exit_price, exit_reason, ts in to_close:
-            self._close_position(pos, exit_price, exit_reason, ts)
+        for pos, exit_price, reason, ts in to_close:
+            self._close_position(pos, exit_price, reason, ts)
 
     def _close_position(self, pos: BacktestPosition, exit_price: float, reason: str, ts: int):
         """Close a position and record the trade."""

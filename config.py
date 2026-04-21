@@ -64,12 +64,12 @@ class Config:
     # Additional "spike pool": include coins whose most recent closed 1H quote
     # volume is >= MIN_1H_QUOTE_VOLUME, even if they miss the 24h top-N list.
     # Designed to catch 爆涨暴跌 that hasn't shown up in the 24h average yet.
-    ENABLE_1H_SPIKE_POOL: bool = True
+    ENABLE_1H_SPIKE_POOL: bool = False
     MIN_1H_QUOTE_VOLUME: float = 10_000_000.0
 
     # Scheduling
     STRATEGY_INTERVAL_HOURS: int = 1
-    RISK_CHECK_INTERVAL_SECONDS: int = 30
+    RISK_CHECK_INTERVAL_SECONDS: int = 60
     HEARTBEAT_INTERVAL_HOURS: int = 6
 
     # Strategy inception date (UTC+8) — drives "运行时长" in heartbeat

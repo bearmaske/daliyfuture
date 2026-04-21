@@ -1,4 +1,5 @@
 """Download historical klines from Binance mainnet and save as CSV."""
+import argparse
 import os
 import sys
 import time
@@ -83,45 +84,58 @@ def klines_to_dataframe(klines: list) -> pd.DataFrame:
     return df
 
 
-def get_resume_start_ms(filepath: str) -> int | None:
-    """If CSV already exists, return the last open_time + 1 for incremental fetch."""
+def get_existing_range(filepath: str) -> tuple[int | None, int | None]:
+    """Return (earliest_open_time, latest_open_time+1) for an existing CSV."""
     if not os.path.exists(filepath):
-        return None
+        return None, None
     try:
         df = pd.read_csv(filepath)
         if df.empty:
-            return None
-        return int(df["open_time"].iloc[-1]) + 1
+            return None, None
+        return int(df["open_time"].iloc[0]), int(df["open_time"].iloc[-1]) + 1
     except Exception:
-        return None
+        return None, None
 
 
 def download_symbol(
     client: Client, symbol: str, interval: str, start_ms: int, end_ms: int
 ):
-    """Download klines for one symbol+interval, with resume support."""
+    """Download klines for one symbol+interval. Supports both backfill and
+    forward extension of an existing CSV."""
     os.makedirs(DATA_DIR, exist_ok=True)
     filename = f"{symbol}_{interval}.csv"
     filepath = os.path.join(DATA_DIR, filename)
 
-    resume_ms = get_resume_start_ms(filepath)
-    actual_start = resume_ms if resume_ms and resume_ms > start_ms else start_ms
+    existing_earliest, existing_next = get_existing_range(filepath)
 
-    if actual_start >= end_ms:
-        print(f"  {filename}: already up to date, skipping")
+    fetches: list[tuple[int, int, str]] = []
+    if existing_earliest is None:
+        fetches.append((start_ms, end_ms, "new"))
+    else:
+        if start_ms < existing_earliest:
+            fetches.append((start_ms, existing_earliest, "backfill"))
+        if existing_next < end_ms:
+            fetches.append((existing_next, end_ms, "forward"))
+
+    if not fetches:
+        print(f"  {filename}: already covers range, skipping")
         return
 
-    if resume_ms:
-        print(f"  {filename}: resuming from {datetime.fromtimestamp(actual_start / 1000, tz=timezone.utc).strftime('%Y-%m-%d')}")
+    all_new = []
+    for a, b, label in fetches:
+        print(f"  {filename}: {label} "
+              f"{datetime.fromtimestamp(a / 1000, tz=timezone.utc):%Y-%m-%d} → "
+              f"{datetime.fromtimestamp(b / 1000, tz=timezone.utc):%Y-%m-%d}")
+        ks = fetch_klines_batched(client, symbol, interval, a, b)
+        all_new.extend(ks)
 
-    klines = fetch_klines_batched(client, symbol, interval, actual_start, end_ms)
-    if not klines:
+    if not all_new:
         print(f"  {filename}: no new data")
         return
 
-    new_df = klines_to_dataframe(klines)
+    new_df = klines_to_dataframe(all_new)
 
-    if resume_ms and os.path.exists(filepath):
+    if os.path.exists(filepath):
         existing_df = pd.read_csv(filepath)
         combined = pd.concat([existing_df, new_df], ignore_index=True)
         combined.drop_duplicates(subset="open_time", inplace=True)
@@ -133,25 +147,42 @@ def download_symbol(
     print(f"  {filename}: {len(new_df)} bars saved")
 
 
-def download_all(symbols: list[str] | None = None, days: int = 365):
-    """Download 1H and 1D klines for all symbols."""
+INTERVAL_MAP = {
+    "1m": Client.KLINE_INTERVAL_1MINUTE,
+    "1h": Client.KLINE_INTERVAL_1HOUR,
+    "1d": Client.KLINE_INTERVAL_1DAY,
+}
+
+
+def download_all(symbols: list[str] | None = None, days: int = 365,
+                 intervals: list[str] | None = None):
+    """Download requested intervals for all symbols."""
     symbols = symbols or DEFAULT_SYMBOLS
+    intervals = intervals or ["1h", "1d"]
     client = Client()
 
     end_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     start_ms = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp() * 1000)
 
-    print(f"Downloading {len(symbols)} symbols x 2 intervals")
+    print(f"Downloading {len(symbols)} symbols x {len(intervals)} intervals ({','.join(intervals)})")
     print(f"Period: {datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc).strftime('%Y-%m-%d')} to {datetime.fromtimestamp(end_ms / 1000, tz=timezone.utc).strftime('%Y-%m-%d')}")
     print(f"Data dir: {os.path.abspath(DATA_DIR)}")
     print()
 
     for i, symbol in enumerate(symbols, 1):
         print(f"[{i}/{len(symbols)}] {symbol}")
-        download_symbol(client, symbol, Client.KLINE_INTERVAL_1HOUR, start_ms, end_ms)
-        download_symbol(client, symbol, Client.KLINE_INTERVAL_1DAY, start_ms, end_ms)
+        for iv in intervals:
+            kline_interval = INTERVAL_MAP[iv]
+            download_symbol(client, symbol, kline_interval, start_ms, end_ms)
         print()
 
 
 if __name__ == "__main__":
-    download_all()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--symbols", help="Comma-separated symbols (default: built-in list)")
+    parser.add_argument("--days", type=int, default=365, help="Lookback window in days")
+    parser.add_argument("--intervals", default="1h,1d", help="Comma-separated: 1m,1h,1d")
+    args = parser.parse_args()
+    sym = args.symbols.split(",") if args.symbols else None
+    ivs = [x.strip() for x in args.intervals.split(",") if x.strip()]
+    download_all(symbols=sym, days=args.days, intervals=ivs)

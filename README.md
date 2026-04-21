@@ -8,10 +8,8 @@
 
 三层过滤 + 优先排序：
 
-1. **选币**：两个池子并集。
-   - **24h 池**：成交额前 50 的 USDT 永续（默认），排除稳定币对、股票/预上市类永续（TSLA/COIN/MSTR 等，`underlyingType=EQUITY/PREMARKET`）、市值前 10 的主流币（BTC/ETH/BNB/SOL/XRP/DOGE/ADA/TRX/TON/AVAX，可通过 `EXCLUDE_TOP10_SYMBOLS` 自定义）。候选需满足 24h 成交额 ≥ `MIN_QUOTE_VOLUME_24H`（默认 $50M）
-   - **1H 爆量池**（`ENABLE_1H_SPIKE_POOL=True`）：额外纳入那些**最近一根已闭合 1H 成交额 ≥ `MIN_1H_QUOTE_VOLUME`**（默认 $10M）的币种，即使它们不在 24h 前 50 里。目的是捕捉"爆涨暴跌"刚刚发生但 24h 均量还没跟上的币
-   - 扫描时并行拉取约 500 根 1H K 线（权重 ~500/2400，耗时 5–10 秒）
+1. **选币**：24h 成交额 Top-50 池（默认），排除稳定币对、股票/预上市类永续（TSLA/COIN/MSTR 等，`underlyingType=EQUITY/PREMARKET`）、市值前 10 的主流币（BTC/ETH/BNB/SOL/XRP/DOGE/ADA/TRX/TON/AVAX，可通过 `EXCLUDE_TOP10_SYMBOLS` 自定义）。候选需满足 24h 成交额 ≥ `MIN_QUOTE_VOLUME_24H`（默认 $50M）
+   - 可选的 **1H 爆量池**（`ENABLE_1H_SPIKE_POOL`，默认 **关闭**）：追加最近一根已闭合 1H 成交额 ≥ `MIN_1H_QUOTE_VOLUME`（默认 $10M）的币，用于捕捉"爆涨暴跌"刚发生但 24h 均量还没跟上的情形
 2. **日线趋势判断**（可配置模式，`TREND_FILTER_MODE`）：
    - `sma`（默认）：SMA 斜率方向 + 价格位置 → 判断做多/做空/跳过
    - `bb_middle`：价格 > 日线布林中轨 → 只做多，< 中轨 → 只做空
@@ -21,6 +19,7 @@
    - 做多方向：1H 收盘价突破上轨 → 开多
    - 做空方向：1H 收盘价跌破下轨 → 开空
 5. **交易量优先开仓**：当同时出现多个信号时，先收集所有信号，按 24h 交易量从大到小排序，优先开仓交易量大的币种
+6. **记账对齐交易所**：市价单成交后读取 Binance 返回的 `avgPrice`/`executedQty`，以此记录入场/出场价和实际成交量。PnL 用 `qty × (exit − entry)` 计算，和 Binance 账户一致（早期版本用下单前 ticker 价 + 名义公式，会出现几十美金量级的偏差）
 
 核心思路：日线确认趋势方向，波动率过滤排除低波动震荡市假突破，小时线捕捉突破入场点。高交易量优先确保流动性充足、滑点更低。
 
@@ -125,7 +124,7 @@ python main.py
 Bot 启动后会持续运行：
 - 启动时立即执行一次策略扫描和止损检查
 - 每小时 :01 扫描市场并检查入场信号
-- 每 30 秒检查持仓 ATR 移动止损
+- 每 60 秒检查持仓 ATR 移动止损
 - 每 6 小时发送策略执行汇报（账户状态、持仓盈亏、胜率）
 
 ### 4. 停止 Bot
@@ -184,9 +183,9 @@ dabao/
 | `EXCLUDE_EQUITY_PERPS` | True | 跳过股票/预上市类永续（EQUITY / PREMARKET） |
 | `EXCLUDE_TOP10_SYMBOLS` | BTC/ETH/BNB/SOL/XRP/DOGE/ADA/TRX/TON/AVAX | 跳过市值前 10 主流币，自由编辑 |
 | `MIN_QUOTE_VOLUME_24H` | 50_000_000 | 24h 成交额下限（USDT），低于此值不进入 24h 池 |
-| `ENABLE_1H_SPIKE_POOL` | True | 是否启用 1H 爆量追加池 |
+| `ENABLE_1H_SPIKE_POOL` | False | 是否启用 1H 爆量追加池 |
 | `MIN_1H_QUOTE_VOLUME` | 10_000_000 | 1H 爆量池下限（USDT），最近一根闭合 1H 成交额达到即纳入 |
-| `RISK_CHECK_INTERVAL_SECONDS` | 30 | 止损检查间隔（秒） |
+| `RISK_CHECK_INTERVAL_SECONDS` | 60 | 止损检查间隔（秒）。回测显示 60s 在 PnL 和 DD 之间平衡最好 |
 | `STRATEGY_START_TIME` | "2026-04-13 00:00:00" | 策略起始时间（UTC+8），用于心跳汇报显示运行时长 |
 
 ## 通知
@@ -231,6 +230,33 @@ BTCUSDT LONG | 入场: 70000.0000 | 现价: 70500.0000 | +$17.86 (+3.6%)
 - **开仓日志**：符号、方向、入场价、数量、名义金额、保证金、杠杆、orderId、余额
 - **止损检查**：持仓时长（`3h12m`）、未实现 PnL（美金+百分比）、ATR 值、止损线、当前生效的止损类型（ATR / 6% 兜底）、距止损线距离、回撤/反弹幅度
 - **平仓日志**：持仓时长、入场 → 出场价、实现 PnL + 百分比、orderId、余额
+
+## 回测
+
+`backtesting/` 下的独立 CLI，用历史数据重放同一套策略。
+
+```bash
+# 下载历史 K 线到 data/（支持断点续下 + 向前/向后回填）
+python backtesting/download_data.py --days 365 --intervals 1h,1d
+python backtesting/download_data.py --days 365 --intervals 1m   # 可选，仅对比扫描频率时需要
+
+# 一年回测（1H 分辨率）
+python -m backtesting.backtest
+python -m backtesting.backtest --symbols BTCUSDT,ETHUSDT --capital 20000 --leverage 10
+
+# 对比不同止损扫描频率（需要 1m 数据）
+python -m backtesting.compare_stop_cadence
+```
+
+一年回测参考（2025-04 → 2026-04, 29 币）：
+
+| cadence | PnL | 年化 | Max DD | Sharpe | PF |
+|---|---|---|---|---|---|
+| 1m | +$20,738 | +207% | 44.3% | 1.13 | 1.40 |
+| 2m | +$19,634 | +196% | 16.4% | **1.19** | 1.39 |
+| 3m | +$17,178 | +172% | 19.1% | 1.19 | 1.34 |
+
+扫描越密 → PnL 略高、"噪声止损"增多、回撤可能显著放大。当前默认值 60 秒是 PnL 偏优档；若更看重资金曲线平滑度，可改为 120 秒。
 
 ## 注意事项
 
