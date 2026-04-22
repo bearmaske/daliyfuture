@@ -16,7 +16,7 @@ import pandas as pd
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from config import config
-from strategy import calculate_bollinger_bands, check_trend, check_trend_bb_middle, check_volatility_expanding
+from strategy import calculate_bollinger_bands, check_trend, check_trend_asymmetric, check_trend_bb_middle, check_trend_rolling, check_volatility_expanding
 from risk import calculate_atr, should_stop_loss
 
 TZ_CN = timezone(timedelta(hours=8))
@@ -189,18 +189,42 @@ class BacktestEngine:
         if len(h_closed) < min_hourly:
             return
 
-        day_ms = 86400000
-        d_mask = (daily_df["open_time"] + day_ms) <= current_ts
-        d_closed = daily_df[d_mask]
-        if len(d_closed) < min_daily:
-            return
-
-        daily_closes = d_closed["close"].tolist()
+        mode = config.TREND_FILTER_MODE
         hourly_closes = h_closed["close"].tolist()
 
         trend = None
-        mode = config.TREND_FILTER_MODE
-        if mode != "disabled":
+        allow_long = allow_short = True  # only used for asymmetric mode
+        if mode == "rolling_sma":
+            rolling_need = self.sma_period * 24 + 24
+            if len(hourly_closes) < rolling_need:
+                return
+            trend = check_trend_rolling(
+                hourly_closes, period_hours=self.sma_period * 24, step_hours=24
+            )
+            if trend is None:
+                return
+        elif mode == "asymmetric":
+            rolling_need = self.sma_period * 24 + 24
+            if len(hourly_closes) < rolling_need:
+                return
+            day_ms = 86400000
+            d_mask = (daily_df["open_time"] + day_ms) <= current_ts
+            d_closed = daily_df[d_mask]
+            if len(d_closed) < min_daily:
+                return
+            daily_closes = d_closed["close"].tolist()
+            allow_long, allow_short = check_trend_asymmetric(
+                daily_closes, hourly_closes, self.sma_period
+            )
+            if not (allow_long or allow_short):
+                return
+        elif mode != "disabled":
+            day_ms = 86400000
+            d_mask = (daily_df["open_time"] + day_ms) <= current_ts
+            d_closed = daily_df[d_mask]
+            if len(d_closed) < min_daily:
+                return
+            daily_closes = d_closed["close"].tolist()
             if mode == "sma":
                 trend = check_trend(daily_closes, self.sma_period)
             elif mode == "bb_middle":
@@ -222,7 +246,14 @@ class BacktestEngine:
         last_close = hourly_closes[-1]
 
         signal = False
-        if mode != "disabled":
+        if mode == "asymmetric":
+            if last_close > upper and allow_long:
+                signal = True
+                trend = "LONG"
+            elif last_close < lower and allow_short:
+                signal = True
+                trend = "SHORT"
+        elif mode != "disabled":
             if trend == "LONG" and last_close > upper:
                 signal = True
             elif trend == "SHORT" and last_close < lower:

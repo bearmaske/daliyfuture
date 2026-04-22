@@ -35,6 +35,56 @@ def check_trend(closes: List[float], period: int = 20) -> Optional[str]:
     return None
 
 
+def check_trend_rolling(hourly_closes: List[float], period_hours: int = 480,
+                        step_hours: int = 24) -> Optional[str]:
+    """Rolling 20-day SMA trend, evaluated every hour.
+
+    Equivalent to `check_trend(daily_closes, 20)` — same math — but uses the
+    last 480 1H closes instead of 20 closed daily bars, so the slope updates
+    every hour. Removes the up-to-24-hour lag that check_trend suffers on
+    trend-reversal days (SMA only refreshing at UTC midnight).
+
+    slope: mean of last period_hours vs mean shifted back step_hours
+    position: last close vs current SMA
+    """
+    if len(hourly_closes) < period_hours + step_hours:
+        return None
+    arr = np.asarray(hourly_closes, dtype=float)
+    sma_now = float(np.mean(arr[-period_hours:]))
+    sma_prev = float(np.mean(arr[-(period_hours + step_hours):-step_hours]))
+    current = arr[-1]
+    if current > sma_now and sma_now > sma_prev:
+        return "LONG"
+    if current < sma_now and sma_now < sma_prev:
+        return "SHORT"
+    return None
+
+
+def check_trend_asymmetric(
+    daily_closes: List[float],
+    hourly_closes: List[float],
+    sma_period: int = 20,
+) -> Tuple[bool, bool]:
+    """Asymmetric trend filter: LONG slow, SHORT fast.
+
+    LONG: daily-sma (24h lag) — crypto uptrends are gradual; the lag filters
+    noise and keeps us in trends longer.
+    SHORT: rolling-sma on 1H bars (1h lag) + daily-sma veto — crashes are
+    faster than rallies; catching the break early is worth the extra signals,
+    but we don't short when daily trend is clearly LONG.
+    Returns (allow_long, allow_short).
+    """
+    trend_daily = check_trend(daily_closes, sma_period)
+    allow_long = trend_daily == "LONG"
+
+    trend_rolling = check_trend_rolling(
+        hourly_closes, period_hours=sma_period * 24, step_hours=24
+    )
+    allow_short = (trend_rolling == "SHORT") and (trend_daily != "LONG")
+
+    return allow_long, allow_short
+
+
 def check_trend_bb_middle(closes: List[float], period: int = 20, std_dev: float = 2.0) -> Optional[str]:
     """Determine trend by price position relative to daily BB middle.
     Returns 'LONG' if price > middle, 'SHORT' if price < middle, None if insufficient data."""
@@ -126,8 +176,12 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
 
     # +2 for SMA slope comparison, +1 to discard unclosed candle
     daily_kline_limit = config.SMA_PERIOD + 3
-    # Need enough bars for both BB and volatility filter ATR
+    # Rolling SMA needs SMA_PERIOD*24 + slope-step 24h + unclosed bar
+    rolling_hours_needed = config.SMA_PERIOD * 24 + 24
+    # Need enough bars for BB / volatility filter ATR / rolling trend
     hourly_bars_needed = max(config.BB_PERIOD, config.VOL_ATR_LONG + 1) if config.VOL_FILTER_ENABLED else config.BB_PERIOD
+    if config.TREND_FILTER_MODE == "rolling_sma":
+        hourly_bars_needed = max(hourly_bars_needed, rolling_hours_needed)
     hourly_kline_limit = hourly_bars_needed + 2  # +1 for calc, +1 to discard unclosed candle
 
     # Phase 1: scan all symbols and collect signals
@@ -144,30 +198,7 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
             d_middle = 0.0
             mode = config.TREND_FILTER_MODE
 
-            if mode != "disabled":
-                daily_klines = exchange.get_klines(
-                    symbol, Client.KLINE_INTERVAL_1DAY, daily_kline_limit
-                )
-                daily_closes = [float(k[4]) for k in daily_klines[:-1]]  # drop unclosed candle
-                if len(daily_closes) < config.SMA_PERIOD + 1:
-                    logger.info("[跳过] %s | 原因: 日线数据不足 (%d/%d)", symbol, len(daily_closes), config.SMA_PERIOD + 1)
-                    skip_counts["日线数据不足"] += 1
-                    continue
-                if mode == "sma":
-                    trend = check_trend(daily_closes, config.SMA_PERIOD)
-                elif mode == "bb_middle":
-                    trend = check_trend_bb_middle(daily_closes, config.SMA_PERIOD, config.BB_STD)
-                if trend is None:
-                    # Extra context: show current vs SMA so we know why it's flat
-                    sma_now = float(np.mean(daily_closes[-config.SMA_PERIOD:]))
-                    sma_prev = float(np.mean(daily_closes[-config.SMA_PERIOD - 1:-1]))
-                    slope = "↑" if sma_now > sma_prev else ("↓" if sma_now < sma_prev else "→")
-                    rel = "↑" if daily_closes[-1] > sma_now else "↓"
-                    logger.info("[跳过] %s | 原因: 无明确趋势 (SMA斜率%s, 价格%sSMA)", symbol, slope, rel)
-                    skip_counts["无明确趋势"] += 1
-                    continue
-                _, d_middle, _ = calculate_bollinger_bands(daily_closes, config.SMA_PERIOD, config.BB_STD)
-
+            # Fetch hourly bars first — rolling_sma mode needs ~506 of them
             hourly_klines = exchange.get_klines(
                 symbol, Client.KLINE_INTERVAL_1HOUR, hourly_kline_limit
             )
@@ -176,6 +207,53 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
                 logger.info("[跳过] %s | 原因: 小时线数据不足 (%d/%d)", symbol, len(hourly_closes), config.BB_PERIOD + 1)
                 skip_counts["小时线数据不足"] += 1
                 continue
+
+            if mode != "disabled":
+                if mode == "rolling_sma":
+                    if len(hourly_closes) < rolling_hours_needed:
+                        logger.info("[跳过] %s | 原因: 小时线数据不足(滚动SMA需 %d/%d)",
+                                    symbol, len(hourly_closes), rolling_hours_needed)
+                        skip_counts["小时线数据不足"] += 1
+                        continue
+                    trend = check_trend_rolling(
+                        hourly_closes, period_hours=config.SMA_PERIOD * 24, step_hours=24
+                    )
+                    if trend is None:
+                        window = np.asarray(hourly_closes[-config.SMA_PERIOD * 24:], dtype=float)
+                        prev_window = np.asarray(
+                            hourly_closes[-(config.SMA_PERIOD * 24 + 24):-24], dtype=float
+                        )
+                        sma_now = float(window.mean())
+                        sma_prev = float(prev_window.mean())
+                        slope = "↑" if sma_now > sma_prev else ("↓" if sma_now < sma_prev else "→")
+                        rel = "↑" if hourly_closes[-1] > sma_now else "↓"
+                        logger.info("[跳过] %s | 原因: 无明确趋势(滚动SMA斜率%s, 价格%sSMA)",
+                                    symbol, slope, rel)
+                        skip_counts["无明确趋势"] += 1
+                        continue
+                    d_middle = float(np.mean(hourly_closes[-config.SMA_PERIOD * 24:]))
+                else:
+                    daily_klines = exchange.get_klines(
+                        symbol, Client.KLINE_INTERVAL_1DAY, daily_kline_limit
+                    )
+                    daily_closes = [float(k[4]) for k in daily_klines[:-1]]  # drop unclosed
+                    if len(daily_closes) < config.SMA_PERIOD + 1:
+                        logger.info("[跳过] %s | 原因: 日线数据不足 (%d/%d)", symbol, len(daily_closes), config.SMA_PERIOD + 1)
+                        skip_counts["日线数据不足"] += 1
+                        continue
+                    if mode == "sma":
+                        trend = check_trend(daily_closes, config.SMA_PERIOD)
+                    elif mode == "bb_middle":
+                        trend = check_trend_bb_middle(daily_closes, config.SMA_PERIOD, config.BB_STD)
+                    if trend is None:
+                        sma_now = float(np.mean(daily_closes[-config.SMA_PERIOD:]))
+                        sma_prev = float(np.mean(daily_closes[-config.SMA_PERIOD - 1:-1]))
+                        slope = "↑" if sma_now > sma_prev else ("↓" if sma_now < sma_prev else "→")
+                        rel = "↑" if daily_closes[-1] > sma_now else "↓"
+                        logger.info("[跳过] %s | 原因: 无明确趋势 (SMA斜率%s, 价格%sSMA)", symbol, slope, rel)
+                        skip_counts["无明确趋势"] += 1
+                        continue
+                    _, d_middle, _ = calculate_bollinger_bands(daily_closes, config.SMA_PERIOD, config.BB_STD)
 
             s_atr = l_atr = 0.0
             ratio = 0.0
@@ -209,8 +287,6 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
                 elif current_close < h_lower:
                     signal = True
                     trend = "SHORT"
-                else:
-                    signal = False
 
             vol = volume_map.get(symbol, 0.0)
             bb_width_pct = (h_upper - h_lower) / h_middle * 100 if h_middle else 0

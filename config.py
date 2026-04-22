@@ -85,10 +85,8 @@ class Config:
                 "BUSDUSDT", "USDCUSDT", "TUSDUSDT", "DAIUSDT", "FDUSDUSDT"
             ]
         if self.EXCLUDE_TOP10_SYMBOLS is None:
-            self.EXCLUDE_TOP10_SYMBOLS = [
-                "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
-                "DOGEUSDT", "ADAUSDT", "TRXUSDT", "TONUSDT", "AVAXUSDT",
-            ]
+            # Empty by default — top 10 majors are included in the scan pool
+            self.EXCLUDE_TOP10_SYMBOLS = []
         # Support multiple Bark URLs, comma-separated
         if self.BARK_URLS is None:
             raw = os.getenv("BARK_URLS", "")

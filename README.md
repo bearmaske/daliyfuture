@@ -8,7 +8,7 @@
 
 三层过滤 + 优先排序：
 
-1. **选币**：24h 成交额 Top-50 池（默认），排除稳定币对、股票/预上市类永续（TSLA/COIN/MSTR 等，`underlyingType=EQUITY/PREMARKET`）、市值前 10 的主流币（BTC/ETH/BNB/SOL/XRP/DOGE/ADA/TRX/TON/AVAX，可通过 `EXCLUDE_TOP10_SYMBOLS` 自定义）。候选需满足 24h 成交额 ≥ `MIN_QUOTE_VOLUME_24H`（默认 $50M）
+1. **选币**：24h 成交额 Top-50 池（默认），排除稳定币对和股票/预上市类永续（TSLA/COIN/MSTR 等，`underlyingType=EQUITY/PREMARKET`）。候选需满足 24h 成交额 ≥ `MIN_QUOTE_VOLUME_24H`（默认 $50M）。`EXCLUDE_TOP10_SYMBOLS` 默认为空列表（主流币 BTC/ETH 等纳入扫描），需要剔除时自行填入
    - 可选的 **1H 爆量池**（`ENABLE_1H_SPIKE_POOL`，默认 **关闭**）：追加最近一根已闭合 1H 成交额 ≥ `MIN_1H_QUOTE_VOLUME`（默认 $10M）的币，用于捕捉"爆涨暴跌"刚发生但 24h 均量还没跟上的情形
 2. **日线趋势判断**（可配置模式，`TREND_FILTER_MODE`）：
    - `sma`（默认）：SMA 斜率方向 + 价格位置 → 判断做多/做空/跳过
@@ -166,7 +166,7 @@ dabao/
 | `POSITION_SIZE` | 500 | 单仓保证金（USDT） |
 | `MAX_POSITIONS` | 10 | 最大同时持仓数 |
 | `LEVERAGE` | 5 | 杠杆倍数 |
-| `TREND_FILTER_MODE` | "sma" | 日线趋势过滤模式：`sma` / `bb_middle` / `disabled` |
+| `TREND_FILTER_MODE` | "sma" | 日线趋势过滤模式：`sma`（默认） / `rolling_sma`（1H 滚动，更敏感） / `asymmetric`（LONG 用 daily-sma、SHORT 用 rolling-sma） / `bb_middle` / `disabled`。一年回测下 `sma` 最优 |
 | `SMA_PERIOD` | 20 | 日线趋势 SMA 周期（独立于布林带周期） |
 | `VOL_FILTER_ENABLED` | True | 波动率过滤开关 |
 | `VOL_ATR_SHORT` | 7 | 短期 ATR 窗口（近期波动率） |
@@ -181,7 +181,7 @@ dabao/
 | `BB_STD` | 2.0 | 布林带标准差倍数 |
 | `TOP_SYMBOLS_COUNT` | 50 | 扫描成交量前 N 币种 |
 | `EXCLUDE_EQUITY_PERPS` | True | 跳过股票/预上市类永续（EQUITY / PREMARKET） |
-| `EXCLUDE_TOP10_SYMBOLS` | BTC/ETH/BNB/SOL/XRP/DOGE/ADA/TRX/TON/AVAX | 跳过市值前 10 主流币，自由编辑 |
+| `EXCLUDE_TOP10_SYMBOLS` | `[]`（空） | 需要剔除的主流币列表，默认不剔除 |
 | `MIN_QUOTE_VOLUME_24H` | 50_000_000 | 24h 成交额下限（USDT），低于此值不进入 24h 池 |
 | `ENABLE_1H_SPIKE_POOL` | False | 是否启用 1H 爆量追加池 |
 | `MIN_1H_QUOTE_VOLUME` | 10_000_000 | 1H 爆量池下限（USDT），最近一根闭合 1H 成交额达到即纳入 |
@@ -246,6 +246,9 @@ python -m backtesting.backtest --symbols BTCUSDT,ETHUSDT --capital 20000 --lever
 
 # 对比不同止损扫描频率（需要 1m 数据）
 python -m backtesting.compare_stop_cadence
+
+# 对比不同趋势过滤模式（sma / rolling_sma / asymmetric）
+python -m backtesting.compare_trend_mode
 ```
 
 一年回测参考（2025-04 → 2026-04, 29 币）：
