@@ -186,6 +186,96 @@ class StateManager:
         self.save()
         return False
 
+    def add_symbol_blacklist(self, symbol: str, reason: str, hours: int):
+        """Add `symbol` to an explicit blacklist for `hours`. If already present,
+        extend the expiry only when the new expiry is later."""
+        now = datetime.now(TZ_CN)
+        until = now + timedelta(hours=hours)
+        with self._lock:
+            bl = self.state.setdefault("symbol_blacklist", {})
+            existing = bl.get(symbol)
+            if existing:
+                try:
+                    existing_until = datetime.strptime(
+                        existing["until"], "%Y-%m-%d %H:%M:%S"
+                    ).replace(tzinfo=TZ_CN)
+                except (KeyError, ValueError):
+                    existing_until = now
+                if existing_until >= until:
+                    return
+            bl[symbol] = {
+                "until": until.strftime("%Y-%m-%d %H:%M:%S"),
+                "reason": reason,
+                "added_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        self.save()
+
+    def symbol_blacklist_remaining(self, symbol: str) -> Optional[tuple]:
+        """Return (remaining_str, reason) if symbol is blacklisted, else None.
+        Expired entries are lazily cleaned up."""
+        with self._lock:
+            bl = self.state.get("symbol_blacklist", {})
+            entry = bl.get(symbol)
+            if not entry:
+                return None
+        try:
+            until = datetime.strptime(entry["until"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=TZ_CN)
+        except (KeyError, ValueError):
+            return None
+        remaining = until - datetime.now(TZ_CN)
+        if remaining.total_seconds() <= 0:
+            with self._lock:
+                self.state.get("symbol_blacklist", {}).pop(symbol, None)
+            self.save()
+            return None
+        hours, rem = divmod(int(remaining.total_seconds()), 3600)
+        minutes = rem // 60
+        return f"{hours}小时{minutes}分钟", entry.get("reason", "未知")
+
+    def symbol_cooldown_remaining(
+        self,
+        symbol: str,
+        loss_threshold: int,
+        window_hours: int,
+        cooldown_hours: int,
+    ) -> Optional[str]:
+        """If `symbol` has >= loss_threshold losing trades closed within the
+        last `window_hours`, return the remaining cooldown as 'Xh Ym'. Cooldown
+        starts at the Nth-from-last loss and lasts `cooldown_hours`.
+        Returns None if the symbol is tradeable.
+        """
+        now = datetime.now(TZ_CN)
+        window_start = now - timedelta(hours=window_hours)
+        losses = []
+        with self._lock:
+            history = list(self.state.get("trade_history", []))
+        for t in history:
+            if t.get("symbol") != symbol:
+                continue
+            if (t.get("pnl") or 0) >= 0:
+                continue
+            closed_str = t.get("closed_at")
+            if not closed_str:
+                continue
+            try:
+                closed = datetime.strptime(closed_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=TZ_CN)
+            except ValueError:
+                continue
+            if closed >= window_start:
+                losses.append(closed)
+        if len(losses) < loss_threshold:
+            return None
+        losses.sort()
+        # Cooldown anchored at the trade that hit the threshold
+        anchor = losses[loss_threshold - 1]
+        cooldown_until = anchor + timedelta(hours=cooldown_hours)
+        remaining = cooldown_until - now
+        if remaining.total_seconds() <= 0:
+            return None
+        hours, rem = divmod(int(remaining.total_seconds()), 3600)
+        minutes = rem // 60
+        return f"{hours}小时{minutes}分钟"
+
     def cooldown_remaining(self) -> Optional[str]:
         """Return remaining cooldown time as a human-readable string, or None."""
         cooldown_str = self.state.get("cooldown_until")

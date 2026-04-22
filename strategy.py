@@ -1,10 +1,16 @@
 import numpy as np
 from typing import List, Optional, Tuple
 from binance.client import Client
+from binance.exceptions import BinanceAPIException
 from config import config
 from exchange import Exchange
 from state import StateManager
 from notifier import notify, logger
+
+# Error codes that mean "Binance itself is refusing to take a new long/short
+# position for this symbol right now" — treat as a strong market signal and
+# blacklist the symbol for POSITION_RISK_BLACKLIST_HOURS.
+POSITION_RISK_ERROR_CODES = {-4106, -4129, -4131}
 
 
 def calculate_bollinger_bands(
@@ -166,6 +172,8 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
 
     skip_counts = {
         "已持仓": 0,
+        "币种冷却": 0,
+        "风控黑名单": 0,
         "日线数据不足": 0,
         "无明确趋势": 0,
         "小时线数据不足": 0,
@@ -191,6 +199,27 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
         if state_mgr.get_position_by_symbol(symbol):
             logger.info("[跳过] %s | 原因: 已持仓", symbol)
             skip_counts["已持仓"] += 1
+            continue
+
+        blacklisted = state_mgr.symbol_blacklist_remaining(symbol)
+        if blacklisted:
+            remaining, reason = blacklisted
+            logger.info("[跳过] %s | 原因: 风控黑名单 (%s, 剩余 %s)",
+                        symbol, reason, remaining)
+            skip_counts["风控黑名单"] += 1
+            continue
+
+        cooldown_left = state_mgr.symbol_cooldown_remaining(
+            symbol,
+            loss_threshold=config.SYMBOL_LOSS_THRESHOLD,
+            window_hours=config.SYMBOL_COOLDOWN_WINDOW_HOURS,
+            cooldown_hours=config.SYMBOL_COOLDOWN_HOURS,
+        )
+        if cooldown_left:
+            logger.info("[跳过] %s | 原因: 币种冷却中 (近%dh内%d+次亏损, 剩余 %s)",
+                        symbol, config.SYMBOL_COOLDOWN_WINDOW_HOURS,
+                        config.SYMBOL_LOSS_THRESHOLD, cooldown_left)
+            skip_counts["币种冷却"] += 1
             continue
 
         try:
@@ -420,5 +449,23 @@ def _open_position(
             f"{symbol} | 成交价 {fill_price:.4f} | 数量 {executed_qty:g} | "
             f"保证金 ${config.POSITION_SIZE}{funding_msg}",
         )
+    except BinanceAPIException as e:
+        if getattr(e, "code", None) in POSITION_RISK_ERROR_CODES:
+            state_mgr.add_symbol_blacklist(
+                symbol,
+                reason=f"Binance风控拒单({e.code})",
+                hours=config.POSITION_RISK_BLACKLIST_HOURS,
+            )
+            logger.error(
+                "[开仓] %s 被 Binance 风控拒单 (code=%s): %s | 已加入 %dh 黑名单",
+                symbol, e.code, e.message, config.POSITION_RISK_BLACKLIST_HOURS,
+            )
+            notify(
+                "币种加入黑名单",
+                f"{symbol} {side} 被 Binance 风控拒单 (code={e.code})\n"
+                f"已加入 {config.POSITION_RISK_BLACKLIST_HOURS}h 黑名单",
+            )
+        else:
+            logger.error(f"Failed to open {side} {symbol}: {e}")
     except Exception as e:
         logger.error(f"Failed to open {side} {symbol}: {e}")

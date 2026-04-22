@@ -36,6 +36,20 @@
 
 波动大的币自动放宽止损（不被正常波动洗掉），波动小的币自动收紧（及时止损）。没有固定止盈，让利润奔跑。
 
+#### 同币种冷却（Per-Symbol Cooldown）
+
+- 近 `SYMBOL_COOLDOWN_WINDOW_HOURS`（默认 24h）内该币种累计亏损 ≥ `SYMBOL_LOSS_THRESHOLD`（默认 2）笔 → 进入 `SYMBOL_COOLDOWN_HOURS`（默认 24h）冷却
+- 冷却中该币不会进入扫描/开仓流程
+- 无需额外 state 字段，直接读 `trade_history`，重启自动恢复
+- 典型场景：同一币反复 BB 突破反复被止损，避免越亏越深
+
+#### Binance 风控黑名单（Position-Risk Blacklist）
+
+- 下单时如果 Binance 返回 `-4106`（symbol under position risk control）或相近风险控制错误码（`-4129`/`-4131`），该币立即加入 `POSITION_RISK_BLACKLIST_HOURS`（默认 24h）黑名单
+- 黑名单中该币不会尝试开仓
+- 依据：Binance 对某币做 position risk control 通常意味着 OI 超限、波动率异常、期现基差过大 — 忽略该信号并在一小时后重试是刻意对抗市场
+- 持久化在 `state.symbol_blacklist`，重启恢复，过期自动清理
+
 #### 全局熔断（Circuit Breaker）
 
 - 每次止损检查时，先检测总资产是否跌破初始资金的 85%（即亏损 15%）
@@ -177,6 +191,10 @@ dabao/
 | `MAX_STOP_LOSS` | 0.06 | 最大止损百分比（6% 兜底） |
 | `MAX_DRAWDOWN_PCT` | 0.15 | 全局熔断阈值（总资产回撤 15% 触发强平） |
 | `COOLDOWN_HOURS` | 24 | 熔断后冷静期时长（小时） |
+| `SYMBOL_LOSS_THRESHOLD` | 2 | 同币种冷却触发阈值（近窗口内累计亏损笔数） |
+| `SYMBOL_COOLDOWN_WINDOW_HOURS` | 24 | 同币种冷却的观察窗口（小时） |
+| `SYMBOL_COOLDOWN_HOURS` | 24 | 同币种冷却时长（小时） |
+| `POSITION_RISK_BLACKLIST_HOURS` | 24 | Binance `-4106` 等风控拒单后的黑名单时长（小时） |
 | `BB_PERIOD` | 20 | 布林带周期 |
 | `BB_STD` | 2.0 | 布林带标准差倍数 |
 | `TOP_SYMBOLS_COUNT` | 50 | 扫描成交量前 N 币种 |

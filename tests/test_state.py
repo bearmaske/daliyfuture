@@ -2,8 +2,9 @@
 import json
 import os
 import tempfile
+from datetime import datetime, timedelta
 import pytest
-from state import StateManager
+from state import StateManager, TZ_CN
 
 
 @pytest.fixture
@@ -86,3 +87,118 @@ def test_thread_safety(state_mgr):
     state_mgr.load()
     assert hasattr(state_mgr, "_lock")
     assert isinstance(state_mgr._lock, type(threading.Lock()))
+
+
+def _add_closed_trade(state_mgr, symbol: str, pnl: float, closed_ago_hours: float):
+    state_mgr.load()
+    closed_at = (datetime.now(TZ_CN) - timedelta(hours=closed_ago_hours)).strftime("%Y-%m-%d %H:%M:%S")
+    state_mgr.state["trade_history"].append({
+        "id": f"t-{symbol}-{closed_ago_hours}",
+        "symbol": symbol,
+        "side": "LONG",
+        "entry_price": 1.0,
+        "exit_price": 0.9 if pnl < 0 else 1.1,
+        "quantity": 100,
+        "pnl": pnl,
+        "commission": None,
+        "open_order_id": None,
+        "close_order_id": None,
+        "opened_at": closed_at,
+        "closed_at": closed_at,
+    })
+    state_mgr.save()
+
+
+def test_symbol_cooldown_triggers_after_threshold(state_mgr):
+    _add_closed_trade(state_mgr, "BASUSDT", pnl=-50.0, closed_ago_hours=2.0)
+    _add_closed_trade(state_mgr, "BASUSDT", pnl=-30.0, closed_ago_hours=1.0)
+    remaining = state_mgr.symbol_cooldown_remaining(
+        "BASUSDT", loss_threshold=2, window_hours=24, cooldown_hours=24
+    )
+    assert remaining is not None
+    assert "小时" in remaining
+
+
+def test_symbol_cooldown_below_threshold(state_mgr):
+    _add_closed_trade(state_mgr, "BASUSDT", pnl=-50.0, closed_ago_hours=2.0)
+    assert state_mgr.symbol_cooldown_remaining(
+        "BASUSDT", loss_threshold=2, window_hours=24, cooldown_hours=24
+    ) is None
+
+
+def test_symbol_cooldown_ignores_wins(state_mgr):
+    _add_closed_trade(state_mgr, "BASUSDT", pnl=+80.0, closed_ago_hours=2.0)
+    _add_closed_trade(state_mgr, "BASUSDT", pnl=+50.0, closed_ago_hours=1.0)
+    assert state_mgr.symbol_cooldown_remaining(
+        "BASUSDT", loss_threshold=2, window_hours=24, cooldown_hours=24
+    ) is None
+
+
+def test_symbol_cooldown_outside_window(state_mgr):
+    _add_closed_trade(state_mgr, "BASUSDT", pnl=-50.0, closed_ago_hours=48.0)
+    _add_closed_trade(state_mgr, "BASUSDT", pnl=-30.0, closed_ago_hours=30.0)
+    assert state_mgr.symbol_cooldown_remaining(
+        "BASUSDT", loss_threshold=2, window_hours=24, cooldown_hours=24
+    ) is None
+
+
+def test_symbol_cooldown_expires(state_mgr):
+    # Two losses that hit threshold 30 hours ago — cooldown_hours=24 → expired
+    _add_closed_trade(state_mgr, "BASUSDT", pnl=-50.0, closed_ago_hours=32.0)
+    _add_closed_trade(state_mgr, "BASUSDT", pnl=-30.0, closed_ago_hours=25.0)
+    # Use a longer window so both trades are considered
+    assert state_mgr.symbol_cooldown_remaining(
+        "BASUSDT", loss_threshold=2, window_hours=48, cooldown_hours=24
+    ) is None
+
+
+def test_symbol_cooldown_is_per_symbol(state_mgr):
+    _add_closed_trade(state_mgr, "BASUSDT", pnl=-50.0, closed_ago_hours=2.0)
+    _add_closed_trade(state_mgr, "BASUSDT", pnl=-30.0, closed_ago_hours=1.0)
+    assert state_mgr.symbol_cooldown_remaining(
+        "BSBUSDT", loss_threshold=2, window_hours=24, cooldown_hours=24
+    ) is None
+
+
+def test_blacklist_add_and_query(state_mgr):
+    state_mgr.load()
+    state_mgr.add_symbol_blacklist("METUSDT", reason="Binance风控拒单(-4106)", hours=24)
+    result = state_mgr.symbol_blacklist_remaining("METUSDT")
+    assert result is not None
+    remaining, reason = result
+    assert "小时" in remaining
+    assert "-4106" in reason
+
+
+def test_blacklist_not_present(state_mgr):
+    state_mgr.load()
+    assert state_mgr.symbol_blacklist_remaining("NOTHINGUSDT") is None
+
+
+def test_blacklist_extends_expiry(state_mgr):
+    state_mgr.load()
+    state_mgr.add_symbol_blacklist("METUSDT", reason="first", hours=1)
+    state_mgr.add_symbol_blacklist("METUSDT", reason="second", hours=24)
+    result = state_mgr.symbol_blacklist_remaining("METUSDT")
+    assert result is not None
+    remaining, reason = result
+    # Second call should have extended to 24h, reason updated
+    assert "second" in reason
+
+
+def test_blacklist_does_not_shrink(state_mgr):
+    state_mgr.load()
+    state_mgr.add_symbol_blacklist("METUSDT", reason="long", hours=48)
+    state_mgr.add_symbol_blacklist("METUSDT", reason="short", hours=1)
+    result = state_mgr.symbol_blacklist_remaining("METUSDT")
+    assert result is not None
+    remaining, reason = result
+    # Reason should still be the first (longer) one
+    assert reason == "long"
+
+
+def test_blacklist_per_symbol(state_mgr):
+    state_mgr.load()
+    state_mgr.add_symbol_blacklist("METUSDT", reason="x", hours=24)
+    assert state_mgr.symbol_blacklist_remaining("METUSDT") is not None
+    assert state_mgr.symbol_blacklist_remaining("BTCUSDT") is None

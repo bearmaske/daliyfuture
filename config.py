@@ -37,6 +37,14 @@ class Config:
     # Global Drawdown Circuit Breaker
     MAX_DRAWDOWN_PCT: float = 0.15  # force-close all if total assets drop 15% from initial
     COOLDOWN_HOURS: int = 24        # cooldown period after circuit breaker triggers
+    # Per-symbol cooldown: a symbol that loses this many trades within
+    # SYMBOL_COOLDOWN_WINDOW_HOURS enters a SYMBOL_COOLDOWN_HOURS blacklist.
+    SYMBOL_LOSS_THRESHOLD: int = 2
+    SYMBOL_COOLDOWN_WINDOW_HOURS: int = 24
+    SYMBOL_COOLDOWN_HOURS: int = 24
+    # Binance position-risk blacklist: if open-order is rejected with a
+    # position-risk error code (e.g. -4106), blacklist the symbol this long.
+    POSITION_RISK_BLACKLIST_HOURS: int = 24
 
     # Trend Filter: "sma" = SMA slope, "bb_middle" = price vs daily BB middle, "disabled" = no filter
     TREND_FILTER_MODE: str = "sma"

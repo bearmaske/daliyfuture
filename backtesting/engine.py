@@ -163,6 +163,8 @@ class BacktestEngine:
                         break
                     if any(p.symbol == symbol for p in self.positions):
                         continue
+                    if self._symbol_in_cooldown(symbol, ts):
+                        continue
                     self._check_signal(symbol, ts, hourly_df, daily_df, min_hourly_bars, min_daily_bars)
 
             # 4. Record equity
@@ -173,6 +175,36 @@ class BacktestEngine:
         self._close_remaining(hourly_timeline[-1] if hourly_timeline else 0, data)
 
         return self.trades, self.equity_curve
+
+    def _symbol_in_cooldown(self, symbol: str, current_ts: int) -> bool:
+        """Mirror state.symbol_cooldown_remaining for backtest.
+        Returns True if `symbol` has accumulated >= SYMBOL_LOSS_THRESHOLD
+        losing trades in the past SYMBOL_COOLDOWN_WINDOW_HOURS AND that
+        threshold was hit within SYMBOL_COOLDOWN_HOURS of `current_ts`.
+        """
+        if not getattr(config, "SYMBOL_LOSS_THRESHOLD", 0):
+            return False
+        HOUR_MS = 3600_000
+        window_ms = config.SYMBOL_COOLDOWN_WINDOW_HOURS * HOUR_MS
+        cooldown_ms = config.SYMBOL_COOLDOWN_HOURS * HOUR_MS
+        threshold = config.SYMBOL_LOSS_THRESHOLD
+        losses = []
+        from datetime import datetime
+        for t in self.trades:
+            if t.symbol != symbol or t.pnl >= 0:
+                continue
+            try:
+                closed_dt = datetime.strptime(t.closed_at, "%Y-%m-%d %H:%M:%S").replace(tzinfo=TZ_CN)
+            except ValueError:
+                continue
+            closed_ms = int(closed_dt.timestamp() * 1000)
+            if current_ts - closed_ms <= window_ms:
+                losses.append(closed_ms)
+        if len(losses) < threshold:
+            return False
+        losses.sort()
+        anchor_ms = losses[threshold - 1]
+        return current_ts - anchor_ms < cooldown_ms
 
     def _check_signal(
         self,
