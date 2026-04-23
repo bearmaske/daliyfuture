@@ -301,6 +301,15 @@ class BacktestEngine:
         if not signal:
             return
 
+        if (
+            trend == "LONG"
+            and getattr(config, "LONG_REQUIRE_BULL_CANDLE", False)
+            and len(h_closed) >= 1
+        ):
+            last_bar = h_closed.iloc[-1]
+            if float(last_bar["close"]) <= float(last_bar["open"]):
+                return
+
         current_bar = hourly_df[hourly_df["open_time"] == current_ts]
         if current_bar.empty:
             return

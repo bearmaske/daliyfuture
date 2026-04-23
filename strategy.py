@@ -178,6 +178,7 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
         "无明确趋势": 0,
         "小时线数据不足": 0,
         "波动率收缩": 0,
+        "阴线不开多": 0,
         "无突破": 0,
         "异常": 0,
     }
@@ -301,6 +302,9 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
             h_upper, h_middle, h_lower = calculate_bollinger_bands(hourly_closes, config.BB_PERIOD, config.BB_STD)
             current_close = hourly_closes[-1]
             current_price = exchange.get_price(symbol)
+            # Last closed 1H bar (hourly_klines[-1] is unclosed, already dropped)
+            last_closed_open = float(hourly_klines[-2][1])
+            bull_candle = current_close > last_closed_open
 
             if mode != "disabled":
                 if trend == "LONG" and current_close > h_upper:
@@ -316,6 +320,12 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
                 elif current_close < h_lower:
                     signal = True
                     trend = "SHORT"
+
+            if signal and trend == "LONG" and config.LONG_REQUIRE_BULL_CANDLE and not bull_candle:
+                logger.info("[跳过] %s | 原因: LONG信号但上一根1H为阴线 (开:%.4f 收:%.4f)",
+                            symbol, last_closed_open, current_close)
+                skip_counts["阴线不开多"] += 1
+                signal = False
 
             vol = volume_map.get(symbol, 0.0)
             bb_width_pct = (h_upper - h_lower) / h_middle * 100 if h_middle else 0

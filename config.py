@@ -60,6 +60,11 @@ class Config:
     BB_PERIOD: int = 20
     BB_STD: float = 2.0
 
+    # Candle-color filter: if the last closed 1H candle is bearish (close < open),
+    # skip LONG entries. Avoids buying into a bar that closed down despite breaking
+    # the upper band (late breakout / fake-out).
+    LONG_REQUIRE_BULL_CANDLE: bool = True
+
     # Scanning
     TOP_SYMBOLS_COUNT: int = 50
     STABLECOIN_FILTER: list = None
