@@ -24,8 +24,8 @@ class Config:
     PUSHDEER_KEYS: list = None
 
     # Capital & Position
-    INITIAL_CAPITAL: float = 5000.0
-    POSITION_SIZE: float = 250.0
+    INITIAL_CAPITAL: float = 10000.0
+    POSITION_SIZE: float = 500.0
     MAX_POSITIONS: int = 10
     LEVERAGE: int = 5
 
@@ -35,7 +35,7 @@ class Config:
     MAX_STOP_LOSS: float = 0.06  # hard cap: 6% regardless of ATR
 
     # Global Drawdown Circuit Breaker
-    MAX_DRAWDOWN_PCT: float = 0.15  # force-close all if total assets drop 15% from initial
+    MAX_DRAWDOWN_PCT: float = 0.20  # force-close all if total assets drop 20% from initial
     COOLDOWN_HOURS: int = 24        # cooldown period after circuit breaker triggers
     # Per-symbol cooldown: a symbol that loses this many trades within
     # SYMBOL_COOLDOWN_WINDOW_HOURS enters a SYMBOL_COOLDOWN_HOURS blacklist.
