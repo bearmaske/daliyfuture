@@ -9,6 +9,7 @@ from exchange import Exchange
 from state import StateManager, get_runtime
 from strategy import run_strategy
 from risk import check_stop_loss, calculate_pnl
+from watcher import MarkPriceWatcher
 from notifier import notify, logger
 
 TZ_CN = timezone(timedelta(hours=8))
@@ -45,6 +46,9 @@ def main():
     )
     state_mgr.load()
 
+    watcher = MarkPriceWatcher(exchange, state_mgr)
+    watcher.start()
+
     sync_label = "实盘" if config.is_live else "Testnet"
     logger.info("[同步] 正在从 %s 同步账户数据...", sync_label)
     try:
@@ -63,11 +67,18 @@ def main():
 
     scheduler.add_listener(job_error_listener, EVENT_JOB_ERROR)
 
+    def strategy_job():
+        run_strategy(exchange, state_mgr)
+        watcher.update_subscriptions()
+
+    def risk_job():
+        check_stop_loss(exchange, state_mgr)
+        watcher.update_subscriptions()
+
     scheduler.add_job(
-        run_strategy,
+        strategy_job,
         "cron",
         minute=1,
-        args=[exchange, state_mgr],
         id="strategy",
         max_instances=1,
         misfire_grace_time=60,
@@ -75,10 +86,9 @@ def main():
     )
 
     scheduler.add_job(
-        check_stop_loss,
+        risk_job,
         "interval",
         seconds=config.RISK_CHECK_INTERVAL_SECONDS,
-        args=[exchange, state_mgr],
         id="risk",
         max_instances=1,
         misfire_grace_time=60,
@@ -95,6 +105,7 @@ def main():
     def shutdown(signum, frame):
         logger.info("Shutting down...")
         scheduler.shutdown(wait=False)
+        watcher.stop()
         state_mgr.save()
         notify("Bot 停止", "DualTrend Bollinger Strategy Bot 已停止")
         sys.exit(0)
@@ -112,6 +123,7 @@ def main():
     logger.info("[启动] 立即执行首次策略扫描...")
     run_strategy(exchange, state_mgr)
     check_stop_loss(exchange, state_mgr)
+    watcher.update_subscriptions()
 
     try:
         scheduler.start()
