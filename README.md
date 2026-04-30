@@ -31,12 +31,18 @@
 | 激活式移动止盈 | `TRAILING_ACTIVATION_PCT = 3%` | 浮盈达到 3% 后激活，本地轮询触发 |
 | 移动止盈回撤 | `TRAILING_DRAWDOWN_PCT = 1%` | 激活后，从最有利价格回撤 1% 出场 |
 
-**固定止损**：开仓市价单成交后，立即向 Binance 挂一单 `STOP_MARKET`（止损价 = 入场价 ± 2%）。止损由交易所直接执行，不依赖 bot 在线。每轮止损检查时查询订单状态：
-- `FILLED` → 本地记录平仓，无需重复下单
+**固定止损**：开仓市价单成交后，立即向 Binance 挂一单 `STOP_MARKET`（止损价 = 入场价 ± 2%）。止损由交易所直接执行，不依赖 bot 在线。每 60 秒查询订单状态：
+- `FILLED` → 本地记录平仓，撤销移动止盈单（OCO）
 - `CANCELED/EXPIRED` → 自动重新挂单
 - 查询失败 → 本地价格检查兜底
 
-**移动止盈**：本地每 60 秒轮询价格，浮盈 ≥ 3% 激活，从最高/最低价回撤 ≥ 1% 触发，触发时先撤销交易所止损单再下市价平仓。
+**移动止盈**：两层机制配合，消除轮询盲区：
+
+1. **WebSocket 实时激活**（`watcher.py`）：后台订阅 `<symbol>@markPrice` 流，每秒收到标记价格。浮盈达到 3% 时立刻以**当时最高价**为激活价，挂 `TRAILING_STOP_MARKET`（回调率 1%，`workingType=MARK_PRICE`）。挂单成功后自动取消订阅。
+2. **交易所实时追踪**：`TRAILING_STOP_MARKET` 挂上后，交易所实时跟踪最高/最低价，回撤 1% 自动触发，不依赖 bot 轮询。
+3. **轮询兜底**（每 60 秒）：查询移动止盈单状态，`FILLED` 撤销固定止损单并记录平仓；`CANCELED/EXPIRED` 用当前极值价重新挂单；WebSocket 挂单失败时本地逻辑托底。
+
+两个交易所订单形成手动 OCO：任意一个触发，自动撤销另一个。
 
 ### 全局风控
 
@@ -123,7 +129,8 @@ python main.py
 
 Bot 启动后持续运行：
 - 每小时 :01 扫描市场，检查入场信号
-- 每 60 秒检查持仓止损/止盈
+- 每 60 秒检查持仓止损/止盈订单状态
+- WebSocket 后台线程实时监控标记价格，触发移动止盈激活
 - 每 6 小时推送策略执行汇报
 
 ### 4. 停止 Bot
@@ -149,11 +156,12 @@ python -m pytest tests/ -v
 
 ```
 daliyfuture/
-├── main.py              # 入口，APScheduler 调度
+├── main.py              # 入口，APScheduler 调度 + WebSocket 生命周期管理
 ├── config.py            # 所有策略参数 + 环境变量加载
-├── exchange.py          # Binance API 封装（主网行情 + 模拟/实盘下单）
+├── exchange.py          # Binance API 封装（行情 + 下单 + 止损/移动止盈单）
 ├── strategy.py          # 入场策略（日线趋势 + 1H 布林带 + 24H 极值）
-├── risk.py              # 止损止盈（固定止损 + 激活式移动止盈 + 全局熔断）
+├── risk.py              # 止损止盈（固定止损 + 移动止盈 + 全局熔断）
+├── watcher.py           # WebSocket 实时标记价格监控，触发移动止盈激活
 ├── notifier.py          # 日志 + 通知路由
 ├── state.py             # JSON 状态持久化（持仓、交易历史、黑名单）
 ├── tests/               # 单元测试
