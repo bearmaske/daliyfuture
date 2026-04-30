@@ -446,25 +446,7 @@ def _open_position(
         except Exception as e:
             logger.error("[开仓] %s 止损单下单失败: %s | 将由本地轮询兜底", symbol, e)
 
-        # Trailing TP — TRAILING_STOP_MARKET, activates at entry ± 3%, trails 1%
-        try:
-            activation_price = exchange.round_price(
-                symbol,
-                fill_price * (1 + config.TRAILING_ACTIVATION_PCT) if side == "LONG"
-                else fill_price * (1 - config.TRAILING_ACTIVATION_PCT),
-            )
-            tp_order = exchange.place_trailing_stop_order(
-                symbol, close_side, executed_qty,
-                activation_price=activation_price,
-                callback_rate=config.TRAILING_DRAWDOWN_PCT * 100,
-                position_side=side,
-            )
-            state_mgr.set_trailing_order_id(pos["id"], tp_order.get("orderId"))
-            logger.info("[开仓] %s 移动止盈单 orderId=%s 激活价 %.4f 回调 %.1f%%",
-                        symbol, tp_order.get("orderId"), activation_price,
-                        config.TRAILING_DRAWDOWN_PCT * 100)
-        except Exception as e:
-            logger.error("[开仓] %s 移动止盈单下单失败: %s | 将由本地轮询兜底", symbol, e)
+        # 移动止盈单不在开仓时挂，等浮盈达到 3% 时由止损检查任务用当时最高价挂单
 
         actual_notional = fill_price * executed_qty
         logger.info(

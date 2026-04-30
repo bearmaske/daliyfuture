@@ -135,7 +135,8 @@ def check_drawdown(exchange: Exchange, state_mgr: StateManager) -> bool:
     return True
 
 
-def _check_exchange_order(exchange, state_mgr, pos, order_id, reason, other_order_id_key):
+def _check_exchange_order(exchange, state_mgr, pos, order_id, reason,
+                          other_order_id_key, extreme_price: float = 0.0):
     """Query an exchange order. Returns True if position was closed (FILLED).
     Handles CANCELED/EXPIRED by re-placing. Returns False to continue normal checks."""
     try:
@@ -147,7 +148,6 @@ def _check_exchange_order(exchange, state_mgr, pos, order_id, reason, other_orde
             executed_qty = order_info["executedQty"] or pos["quantity"]
             logger.info("[止损] %s %s | 交易所%s单已触发 @ %.4f | orderId=%s",
                         pos["symbol"], pos["side"], reason, fill_price, order_id)
-            # OCO: cancel the other order
             other_id = pos.get(other_order_id_key)
             if other_id:
                 exchange.cancel_order(pos["symbol"], other_id)
@@ -164,7 +164,7 @@ def _check_exchange_order(exchange, state_mgr, pos, order_id, reason, other_orde
             if reason == "固定止损":
                 _replace_stop_order(exchange, state_mgr, pos)
             else:
-                _replace_trailing_order(exchange, state_mgr, pos)
+                _place_trailing_order(exchange, state_mgr, pos, extreme_price)
 
     except Exception as e:
         logger.warning("[止损] %s 查询%s单失败: %s", pos["symbol"], reason, e)
@@ -229,37 +229,42 @@ def check_stop_loss(exchange: Exchange, state_mgr: StateManager):
                     _close_position(exchange, state_mgr, pos, current_price, "固定止损(兜底)")
                     continue
 
-            # --- Trailing TP (exchange, with local fallback) ---
+            # --- Trailing TP ---
+            # Activation threshold: extreme_price >= entry * (1 + 3%)
+            activation_reached = (
+                pos["highest_price"] >= pos["entry_price"] * (1 + config.TRAILING_ACTIVATION_PCT)
+                if pos["side"] == "LONG"
+                else pos["lowest_price"] <= pos["entry_price"] * (1 - config.TRAILING_ACTIVATION_PCT)
+            )
+
             if trailing_order_id:
+                # Exchange order alive — query status (OCO)
                 if _check_exchange_order(exchange, state_mgr, pos,
-                                         trailing_order_id, "移动止盈", "stop_order_id"):
+                                         trailing_order_id, "移动止盈", "stop_order_id",
+                                         extreme_price=extreme_price):
                     continue
-                # Exchange order alive — no local check needed
                 trailing_label = "交易所挂单中"
+            elif activation_reached:
+                # Threshold reached but no order — place now using current extreme_price
+                _place_trailing_order(exchange, state_mgr, pos, extreme_price)
+                trailing_order_id = pos.get("trailing_order_id")
+                trailing_label = "移动止盈已激活" if trailing_order_id else "激活-挂单失败(本地兜底)"
+                if not trailing_order_id:
+                    # Placement failed — local fallback
+                    trailing_triggered, _ = check_trailing_tp(
+                        side=pos["side"],
+                        entry_price=pos["entry_price"],
+                        extreme_price=extreme_price,
+                        current_price=current_price,
+                        trailing_activated=True,
+                        activation_pct=config.TRAILING_ACTIVATION_PCT,
+                        drawdown_pct=config.TRAILING_DRAWDOWN_PCT,
+                    )
+                    if trailing_triggered:
+                        _close_position(exchange, state_mgr, pos, current_price, "移动止盈(兜底)")
+                        continue
             else:
-                # No exchange trailing order → local fallback
-                _replace_trailing_order(exchange, state_mgr, pos)
-                trailing_triggered, newly_activated = check_trailing_tp(
-                    side=pos["side"],
-                    entry_price=pos["entry_price"],
-                    extreme_price=extreme_price,
-                    current_price=current_price,
-                    trailing_activated=trailing_activated,
-                    activation_pct=config.TRAILING_ACTIVATION_PCT,
-                    drawdown_pct=config.TRAILING_DRAWDOWN_PCT,
-                )
-                if newly_activated and not trailing_activated:
-                    state_mgr.set_trailing_activated(pos["id"])
-                    trailing_activated = True
-                    logger.info("[止损] %s %s | 移动止盈本地激活 | 浮盈 %+.2f%%",
-                                pos["symbol"], pos["side"], profit_pct)
-                if trailing_triggered:
-                    _close_position(exchange, state_mgr, pos, current_price, "移动止盈(兜底)")
-                    continue
-                trailing_label = (
-                    "本地激活" if trailing_activated
-                    else f"本地待激活(需浮盈≥{config.TRAILING_ACTIVATION_PCT*100:.0f}%)"
-                )
+                trailing_label = f"待激活(需浮盈≥{config.TRAILING_ACTIVATION_PCT*100:.0f}%)"
 
             unrealized = calculate_pnl(pos["side"], pos["entry_price"], current_price, pos.get("quantity"))
             unrealized_pct = unrealized / config.POSITION_SIZE * 100
@@ -301,16 +306,15 @@ def _replace_stop_order(exchange: Exchange, state_mgr, pos: dict):
         logger.error("[止损] %s 重新挂止损单失败: %s", pos["symbol"], e)
 
 
-def _replace_trailing_order(exchange: Exchange, state_mgr, pos: dict):
-    """Re-place the TRAILING_STOP_MARKET order. If activationPrice is already
-    past current price (Binance error -2021), clear the order ID so local
-    trailing logic takes over as fallback."""
+def _place_trailing_order(exchange: Exchange, state_mgr, pos: dict, extreme_price: float):
+    """Place (or re-place) TRAILING_STOP_MARKET using current extreme price as activationPrice.
+
+    activationPrice = extreme_price (highest for LONG, lowest for SHORT).
+    Since we only call this once profit >= 3%, extreme_price is at or near
+    current price, so the trailing activates immediately and trails from there.
+    """
     try:
-        activation_price = exchange.round_price(
-            pos["symbol"],
-            pos["entry_price"] * (1 + config.TRAILING_ACTIVATION_PCT) if pos["side"] == "LONG"
-            else pos["entry_price"] * (1 - config.TRAILING_ACTIVATION_PCT),
-        )
+        activation_price = exchange.round_price(pos["symbol"], extreme_price)
         close_side = "SELL" if pos["side"] == "LONG" else "BUY"
         tp_order = exchange.place_trailing_stop_order(
             pos["symbol"], close_side, pos["quantity"],
@@ -320,11 +324,10 @@ def _replace_trailing_order(exchange: Exchange, state_mgr, pos: dict):
         )
         new_id = tp_order.get("orderId")
         state_mgr.set_trailing_order_id(pos["id"], new_id)
-        logger.info("[止损] %s 新移动止盈单 orderId=%s 激活价 %.4f",
-                    pos["symbol"], new_id, activation_price)
+        logger.info("[止损] %s 移动止盈单 orderId=%s 激活价 %.4f 回调 %.1f%%",
+                    pos["symbol"], new_id, activation_price, config.TRAILING_DRAWDOWN_PCT * 100)
     except Exception as e:
-        # -2021: activation price already past current price; fall back to local logic
-        logger.warning("[止损] %s 重新挂移动止盈单失败(%s)，切换本地兜底", pos["symbol"], e)
+        logger.warning("[止损] %s 挂移动止盈单失败: %s | 本地兜底", pos["symbol"], e)
         state_mgr.set_trailing_order_id(pos["id"], None)
 
 
