@@ -224,6 +224,37 @@ class Exchange:
         precision = int(round(-math.log10(tick))) if tick > 0 else 4
         return round(round(price / tick) * tick, precision)
 
+    def place_trailing_stop_order(self, symbol: str, side: str, quantity: float,
+                                  activation_price: float, callback_rate: float,
+                                  position_side: str = None) -> dict:
+        """Place a TRAILING_STOP_MARKET order (exchange-side trailing TP).
+
+        activation_price: price at which trailing starts (entry * 1.03 for LONG)
+        callback_rate: trailing drawdown % in percentage units (1.0 = 1%)
+        workingType=MARK_PRICE avoids wick-spike triggers.
+        """
+        mode_label = "LIVE" if config.is_live else "PAPER"
+        logger.info(
+            "[%s] Placing TRAILING_STOP_MARKET %s: %s qty=%g activationPrice=%.4f callbackRate=%.1f%%",
+            mode_label, side, symbol, quantity, activation_price, callback_rate,
+        )
+        params = dict(
+            symbol=symbol,
+            side=side,
+            type="TRAILING_STOP_MARKET",
+            quantity=quantity,
+            activationPrice=activation_price,
+            callbackRate=callback_rate,
+            workingType="MARK_PRICE",
+        )
+        if self._is_hedge_mode():
+            params["positionSide"] = position_side or "BOTH"
+        else:
+            params["reduceOnly"] = "true"
+        return self._retry(
+            lambda: self.trading_client.futures_create_order(**params)
+        )
+
     def place_stop_order(self, symbol: str, side: str, quantity: float,
                          stop_price: float, position_side: str = None) -> dict:
         """Place a STOP_MARKET order (exchange-side fixed stop loss)."""
