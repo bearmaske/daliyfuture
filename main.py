@@ -113,15 +113,27 @@ def main():
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
 
+    # Calculate next strategy scan time (next :01)
+    now = datetime.now(TZ_CN)
+    if now.minute == 0 and now.second < 60:
+        next_scan = now.replace(minute=1, second=0, microsecond=0)
+    elif now.minute >= 1:
+        from datetime import timedelta as _td
+        next_scan = (now + _td(hours=1)).replace(minute=1, second=0, microsecond=0)
+    else:
+        next_scan = now.replace(minute=1, second=0, microsecond=0)
+    wait_minutes = int((next_scan - now).total_seconds() / 60)
+    wait_seconds = int((next_scan - now).total_seconds() % 60)
+
     logger.info("[调度] 策略检查: 每小时 :01 | 止损监控: 每 %d 秒 | 心跳: 每 %d 小时",
                 config.RISK_CHECK_INTERVAL_SECONDS, config.HEARTBEAT_INTERVAL_HOURS)
+    logger.info("[调度] 首次策略扫描: %s (约 %d 分 %d 秒后)",
+                next_scan.strftime("%H:%M"), wait_minutes, wait_seconds)
     logger.info("=" * 60)
 
-    notify("Bot 启动", f"[{mode_label}] 余额: ${state_mgr.balance:.2f} | 持仓: {state_mgr.position_count}")
+    notify("Bot 启动", f"[{mode_label}] 余额: ${state_mgr.balance:.2f} | 持仓: {state_mgr.position_count}\n"
+                       f"首次策略扫描: {next_scan.strftime('%H:%M')} (约 {wait_minutes} 分钟后)")
 
-    # run_strategy already syncs with Testnet internally, no need to sync again
-    logger.info("[启动] 立即执行首次策略扫描...")
-    run_strategy(exchange, state_mgr)
     check_stop_loss(exchange, state_mgr)
     watcher.update_subscriptions()
 
