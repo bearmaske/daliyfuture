@@ -136,7 +136,15 @@ def check_drawdown(exchange: Exchange, state_mgr: StateManager) -> bool:
 
 
 def check_stop_loss(exchange: Exchange, state_mgr: StateManager):
-    """Check all open positions for fixed SL and trailing TP triggers."""
+    """Check all open positions for stop-loss and trailing-TP triggers.
+
+    Fixed SL is handled by the exchange (STOP_MARKET order). We poll its
+    status each cycle: if FILLED we record the close locally; if CANCELED or
+    EXPIRED we re-place it. Local check_fixed_sl() acts as a fallback for
+    the rare case where the stop order is missing or the status query fails.
+
+    Trailing TP is still local: we cancel the stop order then close via market.
+    """
     if check_drawdown(exchange, state_mgr):
         return
 
@@ -152,6 +160,7 @@ def check_stop_loss(exchange: Exchange, state_mgr: StateManager):
             state_mgr.update_extreme_price(pos["id"], current_price)
 
             trailing_activated = pos.get("trailing_activated", False)
+            stop_order_id = pos.get("stop_order_id")
 
             if pos["side"] == "LONG":
                 extreme_price = pos["highest_price"]
@@ -173,9 +182,44 @@ def check_stop_loss(exchange: Exchange, state_mgr: StateManager):
                 else extreme_price * (1 + config.TRAILING_DRAWDOWN_PCT)
             )
 
-            fixed_sl_hit = check_fixed_sl(
-                pos["side"], pos["entry_price"], current_price, config.FIXED_STOP_LOSS_PCT
-            )
+            # --- Fixed SL: exchange order is authoritative ---
+            if stop_order_id:
+                try:
+                    order_info = exchange.get_order_status(pos["symbol"], stop_order_id)
+                    sl_status = order_info["status"]
+
+                    if sl_status == "FILLED":
+                        fill_price = order_info["avgPrice"] or current_price
+                        executed_qty = order_info["executedQty"] or pos["quantity"]
+                        logger.info("[止损] %s %s | 交易所止损单已触发 @ %.4f | orderId=%s",
+                                    pos["symbol"], pos["side"], fill_price, stop_order_id)
+                        _record_position_close(
+                            state_mgr, pos, fill_price, executed_qty,
+                            close_order_id=stop_order_id, reason="固定止损"
+                        )
+                        _notify_close(pos, fill_price, executed_qty, "固定止损")
+                        continue
+
+                    if sl_status in ("CANCELED", "EXPIRED"):
+                        logger.warning("[止损] %s 止损单 %s 状态 %s，重新挂单",
+                                       pos["symbol"], stop_order_id, sl_status)
+                        _replace_stop_order(exchange, state_mgr, pos)
+
+                except Exception as e:
+                    logger.warning("[止损] %s 查询止损单失败: %s | 本地检查兜底", pos["symbol"], e)
+                    if check_fixed_sl(pos["side"], pos["entry_price"], current_price,
+                                      config.FIXED_STOP_LOSS_PCT):
+                        _close_position(exchange, state_mgr, pos, current_price, "固定止损(兜底)")
+                        continue
+            else:
+                # No stop order on exchange — place one now and do local check as fallback
+                _replace_stop_order(exchange, state_mgr, pos)
+                if check_fixed_sl(pos["side"], pos["entry_price"], current_price,
+                                  config.FIXED_STOP_LOSS_PCT):
+                    _close_position(exchange, state_mgr, pos, current_price, "固定止损(兜底)")
+                    continue
+
+            # --- Trailing TP: local logic ---
             trailing_triggered, newly_activated = check_trailing_tp(
                 side=pos["side"],
                 entry_price=pos["entry_price"],
@@ -189,24 +233,17 @@ def check_stop_loss(exchange: Exchange, state_mgr: StateManager):
             if newly_activated and not trailing_activated:
                 state_mgr.set_trailing_activated(pos["id"])
                 trailing_activated = True
-                logger.info("[止损] %s %s | 移动止盈已激活 | 浮盈 %+.2f%%", pos["symbol"], pos["side"], profit_pct)
+                logger.info("[止损] %s %s | 移动止盈已激活 | 浮盈 %+.2f%%",
+                            pos["symbol"], pos["side"], profit_pct)
 
             unrealized = calculate_pnl(pos["side"], pos["entry_price"], current_price, pos.get("quantity"))
             unrealized_pct = unrealized / config.POSITION_SIZE * 100
             age = _position_age(pos.get("opened_at"))
 
-            status = "安全"
-            close_reason = None
-            if fixed_sl_hit:
-                status = ">>> 固定止损 <<<"
-                close_reason = "固定止损"
-            elif trailing_triggered:
-                status = ">>> 移动止盈 <<<"
-                close_reason = "移动止盈"
-
+            status = "移动止盈触发" if trailing_triggered else "安全"
             logger.info(
                 "[止损] %s %s | 持仓 %s | 入场: %.4f | %s: %.4f | 现价: %.4f | "
-                "PnL: $%+.2f (%+.1f%%) | 固定止损: %.4f | 移动止盈: %s (止损线 %.4f) | %s",
+                "PnL: $%+.2f (%+.1f%%) | 固定止损: %.4f (交易所) | 移动止盈: %s (止损线 %.4f) | %s",
                 pos["symbol"], pos["side"], age,
                 pos["entry_price"],
                 extreme_label, extreme_price,
@@ -218,11 +255,77 @@ def check_stop_loss(exchange: Exchange, state_mgr: StateManager):
                 status,
             )
 
-            if close_reason:
-                _close_position(exchange, state_mgr, pos, current_price, close_reason)
+            if trailing_triggered:
+                _close_position(exchange, state_mgr, pos, current_price, "移动止盈")
 
         except Exception as e:
             logger.error("[止损] %s 检查异常: %s", pos["symbol"], e)
+
+
+def _replace_stop_order(exchange: Exchange, state_mgr, pos: dict):
+    """Place (or re-place) the exchange STOP_MARKET order for a position."""
+    try:
+        sl_price = exchange.round_price(
+            pos["symbol"],
+            pos["entry_price"] * (1 - config.FIXED_STOP_LOSS_PCT) if pos["side"] == "LONG"
+            else pos["entry_price"] * (1 + config.FIXED_STOP_LOSS_PCT),
+        )
+        sl_side = "SELL" if pos["side"] == "LONG" else "BUY"
+        sl_order = exchange.place_stop_order(
+            pos["symbol"], sl_side, pos["quantity"], sl_price, position_side=pos["side"]
+        )
+        new_id = sl_order.get("orderId")
+        state_mgr.set_stop_order_id(pos["id"], new_id)
+        logger.info("[止损] %s 新止损单 orderId=%s 止损价 %.4f", pos["symbol"], new_id, sl_price)
+    except Exception as e:
+        logger.error("[止损] %s 重新挂止损单失败: %s", pos["symbol"], e)
+
+
+def _record_position_close(
+    state_mgr,
+    pos: dict,
+    exit_price: float,
+    executed_qty: float,
+    close_order_id,
+    reason: str,
+):
+    """Record a position close that was already executed on the exchange
+    (e.g. STOP_MARKET order filled). Does NOT place a new order."""
+    raw_pnl = calculate_pnl(pos["side"], pos["entry_price"], exit_price, executed_qty)
+
+    state_mgr.remove_position(pos["id"])
+    state_mgr.add_trade_history(
+        symbol=pos["symbol"],
+        side=pos["side"],
+        entry_price=pos["entry_price"],
+        exit_price=exit_price,
+        quantity=executed_qty,
+        pnl=raw_pnl,
+        commission=None,
+        open_order_id=pos.get("open_order_id"),
+        close_order_id=close_order_id,
+        opened_at=pos["opened_at"],
+    )
+    state_mgr.update_balance(config.POSITION_SIZE + raw_pnl)
+
+    pnl_pct = raw_pnl / config.POSITION_SIZE * 100
+    age = _position_age(pos.get("opened_at"))
+    logger.info(
+        "[平仓] %s %s (%s) | 持仓 %s | 入场 %.4f → 成交价 %.4f | "
+        "数量 %g | PnL $%+.2f (%+.1f%%) | orderId=%s | 余额 $%.2f",
+        pos["symbol"], pos["side"], reason, age,
+        pos["entry_price"], exit_price,
+        executed_qty, raw_pnl, pnl_pct, close_order_id, state_mgr.balance,
+    )
+
+
+def _notify_close(pos: dict, exit_price: float, executed_qty: float, reason: str):
+    raw_pnl = calculate_pnl(pos["side"], pos["entry_price"], exit_price, executed_qty)
+    notify(
+        f"平仓 {pos['side']} ({reason})",
+        f"{pos['symbol']} | 入场 {pos['entry_price']:.4f} | 出场 {exit_price:.4f} | "
+        f"数量 {executed_qty:g} | PnL ${raw_pnl:.2f} (手续费待结算)",
+    )
 
 
 def _close_position(
@@ -230,56 +333,39 @@ def _close_position(
     state_mgr: StateManager,
     pos: dict,
     exit_price: float,
-    reason: str = "ATR移动止损",
+    reason: str = "移动止盈",
 ):
-    """Close a position via market order."""
+    """Close a position via market order. Cancels the exchange stop order first."""
+    # Cancel the exchange stop order so it doesn't double-fire
+    stop_order_id = pos.get("stop_order_id")
+    if stop_order_id:
+        exchange.cancel_order(pos["symbol"], stop_order_id)
+
     close_side = "SELL" if pos["side"] == "LONG" else "BUY"
 
     try:
         order = exchange.place_order(pos["symbol"], close_side, pos["quantity"], position_side=pos["side"])
 
-        # Store order IDs; commission will be backfilled by heartbeat
-        # (Binance trade fills have propagation delay, not available immediately)
         open_order_id = pos.get("open_order_id")
         close_order_id = order.get("orderId")
 
-        # Use actual fill price and executed qty to match exchange PnL.
         actual_exit, executed_qty = exchange.get_order_fill(pos["symbol"], close_order_id, exit_price)
         if executed_qty <= 0:
             executed_qty = pos["quantity"]
         slippage_pct = (actual_exit - exit_price) / exit_price * 100 if exit_price else 0
 
-        raw_pnl = calculate_pnl(pos["side"], pos["entry_price"], actual_exit, executed_qty)
+        _record_position_close(state_mgr, pos, actual_exit, executed_qty, close_order_id, reason)
 
-        state_mgr.remove_position(pos["id"])
-        state_mgr.add_trade_history(
-            symbol=pos["symbol"],
-            side=pos["side"],
-            entry_price=pos["entry_price"],
-            exit_price=actual_exit,
-            quantity=executed_qty,
-            pnl=raw_pnl,
-            commission=None,
-            open_order_id=open_order_id,
-            close_order_id=close_order_id,
-            opened_at=pos["opened_at"],
-        )
-        state_mgr.update_balance(config.POSITION_SIZE + raw_pnl)
-
-        pnl_pct = raw_pnl / config.POSITION_SIZE * 100
+        pnl_pct = calculate_pnl(pos["side"], pos["entry_price"], actual_exit, executed_qty) / config.POSITION_SIZE * 100
         age = _position_age(pos.get("opened_at"))
         logger.info(
-            "[平仓] %s %s (%s) | 持仓 %s | 入场 %.4f → 信号价 %.4f → 成交价 %.4f (滑点 %+.3f%%) | "
-            "数量 %g | PnL $%+.2f (%+.1f%%) | orderId=%s | 余额 $%.2f",
+            "[平仓] %s %s (%s) | 持仓 %s | 信号价 %.4f → 成交价 %.4f (滑点 %+.3f%%) | "
+            "数量 %g | PnL %+.1f%% | orderId=%s",
             pos["symbol"], pos["side"], reason, age,
-            pos["entry_price"], exit_price, actual_exit, slippage_pct,
-            executed_qty, raw_pnl, pnl_pct, close_order_id, state_mgr.balance,
+            exit_price, actual_exit, slippage_pct,
+            executed_qty, pnl_pct, close_order_id,
         )
 
-        notify(
-            f"平仓 {pos['side']} ({reason})",
-            f"{pos['symbol']} | 入场 {pos['entry_price']:.4f} | 出场 {actual_exit:.4f} | "
-            f"数量 {executed_qty:g} | PnL ${raw_pnl:.2f} (手续费待结算)",
-        )
+        _notify_close(pos, actual_exit, executed_qty, reason)
     except Exception as e:
         logger.error(f"Failed to close {pos['symbol']}: {e}")

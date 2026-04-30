@@ -29,6 +29,7 @@ class Exchange:
         # Trading client lazy-initialized (testnet or mainnet depending on mode)
         self._trading_client = None
         self._symbol_filters = {}
+        self._tick_sizes = {}
         self._underlying_types = {}
         self._filters_loaded = False
 
@@ -196,6 +197,8 @@ class Exchange:
             for f in s["filters"]:
                 if f["filterType"] == "LOT_SIZE":
                     self._symbol_filters[s["symbol"]] = float(f["stepSize"])
+                elif f["filterType"] == "PRICE_FILTER":
+                    self._tick_sizes[s["symbol"]] = float(f["tickSize"])
         self._filters_loaded = True
 
     def get_step_size(self, symbol: str) -> float:
@@ -213,6 +216,53 @@ class Exchange:
         step = self.get_step_size(symbol)
         precision = int(round(-math.log10(step)))
         return math.floor(quantity * 10**precision) / 10**precision
+
+    def round_price(self, symbol: str, price: float) -> float:
+        """Round price to symbol's tick size."""
+        self._load_exchange_info()
+        tick = self._tick_sizes.get(symbol, 0.0001)
+        precision = int(round(-math.log10(tick))) if tick > 0 else 4
+        return round(round(price / tick) * tick, precision)
+
+    def place_stop_order(self, symbol: str, side: str, quantity: float,
+                         stop_price: float, position_side: str = None) -> dict:
+        """Place a STOP_MARKET order (exchange-side fixed stop loss)."""
+        mode_label = "LIVE" if config.is_live else "PAPER"
+        logger.info("[%s] Placing STOP_MARKET %s: %s qty=%g stopPrice=%.4f positionSide=%s",
+                    mode_label, side, symbol, quantity, stop_price, position_side or "BOTH")
+        params = dict(
+            symbol=symbol,
+            side=side,
+            type="STOP_MARKET",
+            quantity=quantity,
+            stopPrice=stop_price,
+            timeInForce="GTE_GTC",
+        )
+        if self._is_hedge_mode():
+            params["positionSide"] = position_side or "BOTH"
+        return self._retry(
+            lambda: self.trading_client.futures_create_order(**params)
+        )
+
+    def get_order_status(self, symbol: str, order_id: int) -> dict:
+        """Return order info dict with at least 'status', 'avgPrice', 'executedQty'."""
+        resp = self._retry(lambda: self.trading_client.futures_get_order(
+            symbol=symbol, orderId=order_id
+        ))
+        return {
+            "status": resp.get("status", ""),
+            "avgPrice": float(resp.get("avgPrice") or 0),
+            "executedQty": float(resp.get("executedQty") or 0),
+        }
+
+    def cancel_order(self, symbol: str, order_id: int) -> None:
+        """Cancel an open order. Silently ignores errors if already closed/filled."""
+        try:
+            self._retry(lambda: self.trading_client.futures_cancel_order(
+                symbol=symbol, orderId=order_id
+            ))
+        except Exception as e:
+            logger.debug("[撤单] %s #%s: %s", symbol, order_id, e)
 
     def place_order(self, symbol: str, side: str, quantity: float,
                     position_side: str = None) -> dict:

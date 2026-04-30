@@ -420,7 +420,7 @@ def _open_position(
             executed_qty = quantity
         slippage_pct = (fill_price - current_price) / current_price * 100 if current_price else 0
 
-        state_mgr.add_position(
+        pos = state_mgr.add_position(
             symbol=symbol,
             side=side,
             entry_price=fill_price,
@@ -428,6 +428,24 @@ def _open_position(
             open_order_id=open_order_id,
         )
         state_mgr.update_balance(-config.POSITION_SIZE)
+
+        # Place exchange-side fixed stop loss order immediately after fill
+        stop_order_id = None
+        try:
+            sl_price = exchange.round_price(
+                symbol,
+                fill_price * (1 - config.FIXED_STOP_LOSS_PCT) if side == "LONG"
+                else fill_price * (1 + config.FIXED_STOP_LOSS_PCT),
+            )
+            sl_side = "SELL" if side == "LONG" else "BUY"
+            sl_order = exchange.place_stop_order(
+                symbol, sl_side, executed_qty, sl_price, position_side=side
+            )
+            stop_order_id = sl_order.get("orderId")
+            state_mgr.set_stop_order_id(pos["id"], stop_order_id)
+            logger.info("[开仓] %s 止损单 orderId=%s 止损价 %.4f", symbol, stop_order_id, sl_price)
+        except Exception as e:
+            logger.error("[开仓] %s 止损单下单失败: %s | 将由本地轮询兜底", symbol, e)
 
         actual_notional = fill_price * executed_qty
         logger.info(
