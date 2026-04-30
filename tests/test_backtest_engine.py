@@ -140,4 +140,4 @@ def test_engine_long_signal_opens_and_stops():
 
     assert len(trades) >= 1
     assert trades[0].side == "LONG"
-    assert trades[0].exit_reason in ("atr_stop", "hard_stop", "backtest_end")
+    assert trades[0].exit_reason in ("fixed_sl", "trailing_tp", "backtest_end")

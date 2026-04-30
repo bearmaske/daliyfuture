@@ -2,7 +2,6 @@ from datetime import datetime, timezone, timedelta
 from typing import List
 
 import numpy as np
-from binance.client import Client
 
 from config import config
 from exchange import Exchange
@@ -55,41 +54,39 @@ def calculate_pnl(side: str, entry_price: float, exit_price: float, quantity: fl
     return (entry_price - exit_price) / entry_price * config.POSITION_SIZE * config.LEVERAGE
 
 
-def calculate_atr(klines: list, period: int = 14) -> float:
-    """Calculate Average True Range from klines.
-    Each kline: [open_time, open, high, low, close, volume, ...]."""
-    if len(klines) < period + 1:
-        return 0.0
-    true_ranges = []
-    for i in range(1, len(klines)):
-        high = float(klines[i][2])
-        low = float(klines[i][3])
-        prev_close = float(klines[i - 1][4])
-        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
-        true_ranges.append(tr)
-    return float(np.mean(true_ranges[-period:]))
-
-
-def should_stop_loss(
-    side: str,
-    highest_price: float,
-    lowest_price: float,
-    current_price: float,
-    atr: float,
-    atr_multiplier: float,
-    max_stop_pct: float,
-) -> bool:
-    """Check if ATR trailing stop should trigger, with a hard cap."""
+def check_fixed_sl(side: str, entry_price: float, current_price: float, sl_pct: float) -> bool:
+    """Fixed stop loss: close if price moves sl_pct against entry."""
     if side == "LONG":
-        atr_stop = highest_price - atr_multiplier * atr
-        hard_stop = highest_price * (1 - max_stop_pct)
-        stop_price = max(atr_stop, hard_stop)  # use the tighter one
-        return current_price <= stop_price
+        return current_price <= entry_price * (1 - sl_pct)
+    return current_price >= entry_price * (1 + sl_pct)
+
+
+def check_trailing_tp(
+    side: str,
+    entry_price: float,
+    extreme_price: float,
+    current_price: float,
+    trailing_activated: bool,
+    activation_pct: float,
+    drawdown_pct: float,
+) -> tuple[bool, bool]:
+    """Activation-based trailing TP.
+
+    Returns (triggered, newly_activated).
+    - Activates when floating profit >= activation_pct from entry.
+    - After activation, exits when price retraces drawdown_pct from extreme.
+    """
+    if side == "LONG":
+        profit_pct = (current_price - entry_price) / entry_price
+        newly_activated = (not trailing_activated) and profit_pct >= activation_pct
+        if trailing_activated or newly_activated:
+            return current_price <= extreme_price * (1 - drawdown_pct), newly_activated
     else:
-        atr_stop = lowest_price + atr_multiplier * atr
-        hard_stop = lowest_price * (1 + max_stop_pct)
-        stop_price = min(atr_stop, hard_stop)  # use the tighter one
-        return current_price >= stop_price
+        profit_pct = (entry_price - current_price) / entry_price
+        newly_activated = (not trailing_activated) and profit_pct >= activation_pct
+        if trailing_activated or newly_activated:
+            return current_price >= extreme_price * (1 + drawdown_pct), newly_activated
+    return False, False
 
 
 def check_drawdown(exchange: Exchange, state_mgr: StateManager) -> bool:
@@ -139,10 +136,9 @@ def check_drawdown(exchange: Exchange, state_mgr: StateManager) -> bool:
 
 
 def check_stop_loss(exchange: Exchange, state_mgr: StateManager):
-    """Check all open positions for ATR trailing stop triggers."""
-    # Check global drawdown circuit breaker first
+    """Check all open positions for fixed SL and trailing TP triggers."""
     if check_drawdown(exchange, state_mgr):
-        return  # all positions closed, skip individual checks
+        return
 
     positions = list(state_mgr.state.get("positions", []))
     if not positions:
@@ -155,64 +151,75 @@ def check_stop_loss(exchange: Exchange, state_mgr: StateManager):
             current_price = exchange.get_price(pos["symbol"])
             state_mgr.update_extreme_price(pos["id"], current_price)
 
-            # Fetch 1H klines for ATR calculation
-            atr_kline_limit = config.ATR_PERIOD + 2
-            hourly_klines = exchange.get_klines(
-                pos["symbol"], Client.KLINE_INTERVAL_1HOUR, atr_kline_limit
-            )
-            atr = calculate_atr(hourly_klines, config.ATR_PERIOD)
+            trailing_activated = pos.get("trailing_activated", False)
 
             if pos["side"] == "LONG":
-                atr_stop = pos["highest_price"] - config.ATR_MULTIPLIER * atr
-                hard_stop = pos["highest_price"] * (1 - config.MAX_STOP_LOSS)
-                stop_price = max(atr_stop, hard_stop)
-                drawdown_pct = (pos["highest_price"] - current_price) / pos["highest_price"] * 100
-                label = "回撤"
-                extreme_label = "最高"
                 extreme_price = pos["highest_price"]
+                profit_pct = (current_price - pos["entry_price"]) / pos["entry_price"] * 100
+                extreme_label = "最高"
             else:
-                atr_stop = pos["lowest_price"] + config.ATR_MULTIPLIER * atr
-                hard_stop = pos["lowest_price"] * (1 + config.MAX_STOP_LOSS)
-                stop_price = min(atr_stop, hard_stop)
-                drawdown_pct = (current_price - pos["lowest_price"]) / pos["lowest_price"] * 100
-                label = "反弹"
-                extreme_label = "最低"
                 extreme_price = pos["lowest_price"]
+                profit_pct = (pos["entry_price"] - current_price) / pos["entry_price"] * 100
+                extreme_label = "最低"
 
-            active_stop = "ATR" if stop_price == atr_stop else "兜底"
-
-            triggered = should_stop_loss(
-                side=pos["side"],
-                highest_price=pos["highest_price"],
-                lowest_price=pos["lowest_price"],
-                current_price=current_price,
-                atr=atr,
-                atr_multiplier=config.ATR_MULTIPLIER,
-                max_stop_pct=config.MAX_STOP_LOSS,
+            fixed_sl_price = (
+                pos["entry_price"] * (1 - config.FIXED_STOP_LOSS_PCT)
+                if pos["side"] == "LONG"
+                else pos["entry_price"] * (1 + config.FIXED_STOP_LOSS_PCT)
+            )
+            trail_stop_price = (
+                extreme_price * (1 - config.TRAILING_DRAWDOWN_PCT)
+                if pos["side"] == "LONG"
+                else extreme_price * (1 + config.TRAILING_DRAWDOWN_PCT)
             )
 
-            status = ">>> 触发止损 <<<" if triggered else "安全"
+            fixed_sl_hit = check_fixed_sl(
+                pos["side"], pos["entry_price"], current_price, config.FIXED_STOP_LOSS_PCT
+            )
+            trailing_triggered, newly_activated = check_trailing_tp(
+                side=pos["side"],
+                entry_price=pos["entry_price"],
+                extreme_price=extreme_price,
+                current_price=current_price,
+                trailing_activated=trailing_activated,
+                activation_pct=config.TRAILING_ACTIVATION_PCT,
+                drawdown_pct=config.TRAILING_DRAWDOWN_PCT,
+            )
+
+            if newly_activated and not trailing_activated:
+                state_mgr.set_trailing_activated(pos["id"])
+                trailing_activated = True
+                logger.info("[止损] %s %s | 移动止盈已激活 | 浮盈 %+.2f%%", pos["symbol"], pos["side"], profit_pct)
 
             unrealized = calculate_pnl(pos["side"], pos["entry_price"], current_price, pos.get("quantity"))
             unrealized_pct = unrealized / config.POSITION_SIZE * 100
             age = _position_age(pos.get("opened_at"))
-            distance_pct = abs(current_price - stop_price) / current_price * 100
+
+            status = "安全"
+            close_reason = None
+            if fixed_sl_hit:
+                status = ">>> 固定止损 <<<"
+                close_reason = "固定止损"
+            elif trailing_triggered:
+                status = ">>> 移动止盈 <<<"
+                close_reason = "移动止盈"
 
             logger.info(
                 "[止损] %s %s | 持仓 %s | 入场: %.4f | %s: %.4f | 现价: %.4f | "
-                "PnL: $%+.2f (%+.1f%%) | ATR: %.4f | 止损线: %.4f (%s, 距 %.2f%%) | %s: %.2f%% | %s",
+                "PnL: $%+.2f (%+.1f%%) | 固定止损: %.4f | 移动止盈: %s (止损线 %.4f) | %s",
                 pos["symbol"], pos["side"], age,
                 pos["entry_price"],
                 extreme_label, extreme_price,
                 current_price,
                 unrealized, unrealized_pct,
-                atr, stop_price, active_stop, distance_pct,
-                label, drawdown_pct,
+                fixed_sl_price,
+                "激活" if trailing_activated else f"待激活(需浮盈≥{config.TRAILING_ACTIVATION_PCT*100:.0f}%)",
+                trail_stop_price,
                 status,
             )
 
-            if triggered:
-                _close_position(exchange, state_mgr, pos, current_price, "ATR移动止损")
+            if close_reason:
+                _close_position(exchange, state_mgr, pos, current_price, close_reason)
 
         except Exception as e:
             logger.error("[止损] %s 检查异常: %s", pos["symbol"], e)

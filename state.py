@@ -81,6 +81,7 @@ class StateManager:
                 "quantity": quantity,
                 "highest_price": entry_price,
                 "lowest_price": entry_price,
+                "trailing_activated": False,
                 "open_order_id": open_order_id,
                 "opened_at": now_cn(),
             }
@@ -112,6 +113,14 @@ class StateManager:
                 if pos["id"] == position_id:
                     return pos
         return None
+
+    def set_trailing_activated(self, position_id: str):
+        with self._lock:
+            for pos in self.state["positions"]:
+                if pos["id"] == position_id:
+                    pos["trailing_activated"] = True
+                    break
+        self.save()
 
     def update_extreme_price(self, position_id: str, current_price: float):
         changed = False

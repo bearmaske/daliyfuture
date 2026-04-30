@@ -16,8 +16,8 @@ import pandas as pd
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from config import config
-from strategy import calculate_bollinger_bands, check_trend, check_trend_asymmetric, check_trend_bb_middle, check_trend_rolling, check_volatility_expanding
-from risk import calculate_atr, should_stop_loss
+from strategy import calculate_bollinger_bands, check_trend, check_trend_asymmetric, check_trend_bb_middle, check_trend_rolling
+from risk import check_fixed_sl, check_trailing_tp
 
 TZ_CN = timezone(timedelta(hours=8))
 
@@ -35,6 +35,7 @@ class BacktestPosition:
     opened_ms: int = 0
     highest_price: float = 0.0
     lowest_price: float = 0.0
+    trailing_activated: bool = False
 
     def __post_init__(self):
         if self.highest_price == 0.0:
@@ -82,9 +83,9 @@ class BacktestEngine:
         bb_period: int = 20,
         bb_std: float = 2.0,
         sma_period: int = 20,
-        atr_period: int = 14,
-        atr_multiplier: float = 2.0,
-        max_stop_pct: float = 0.06,
+        trailing_activation_pct: float = config.TRAILING_ACTIVATION_PCT,
+        trailing_drawdown_pct: float = config.TRAILING_DRAWDOWN_PCT,
+        fixed_stop_loss_pct: float = config.FIXED_STOP_LOSS_PCT,
         stop_check_minutes: int = 60,
     ):
         self.initial_capital = initial_capital
@@ -95,19 +96,17 @@ class BacktestEngine:
         self.bb_period = bb_period
         self.bb_std = bb_std
         self.sma_period = sma_period
-        self.atr_period = atr_period
-        self.atr_multiplier = atr_multiplier
-        self.max_stop_pct = max_stop_pct
+        self.trailing_activation_pct = trailing_activation_pct
+        self.trailing_drawdown_pct = trailing_drawdown_pct
+        self.fixed_stop_loss_pct = fixed_stop_loss_pct
         self.stop_check_minutes = stop_check_minutes
 
         self.positions: list[BacktestPosition] = []
         self.trades: list[BacktestTrade] = []
         self.equity_curve: list[dict] = []
 
-        # Minute data + ATR cache: minute-level stop cadence
         self._minute_data: dict[str, pd.DataFrame] = {}
         self._hourly_data: dict[str, pd.DataFrame] = {}
-        self._atr_cache: dict[tuple[str, int], float] = {}
 
     def run(
         self, data: dict[str, tuple[pd.DataFrame, pd.DataFrame]],
@@ -264,51 +263,46 @@ class BacktestEngine:
             if trend is None:
                 return
 
-        if config.VOL_FILTER_ENABLED:
-            h_arr = h_closed[["open_time", "open", "high", "low", "close", "volume"]].values
-            expanding, _, _, _ = check_volatility_expanding(
-                h_arr, config.VOL_ATR_SHORT, config.VOL_ATR_LONG, config.VOL_ATR_THRESHOLD
-            )
-            if not expanding:
-                return
-
         upper, middle, lower = calculate_bollinger_bands(
             hourly_closes, self.bb_period, self.bb_std
         )
         last_close = hourly_closes[-1]
 
+        # 24-bar high/low confirmation: signal bar's high must be 24H high (LONG),
+        # or signal bar's low must be 24H low (SHORT).
+        if len(h_closed) >= 25:
+            signal_bar = h_closed.iloc[-1]
+            signal_high = float(signal_bar["high"])
+            signal_low = float(signal_bar["low"])
+            lookback = h_closed.iloc[-25:-1]
+            is_24h_high = signal_high >= lookback["high"].max()
+            is_24h_low = signal_low <= lookback["low"].min()
+        else:
+            is_24h_high = is_24h_low = False
+
         signal = False
         if mode == "asymmetric":
-            if last_close > upper and allow_long:
+            if last_close > upper and allow_long and is_24h_high:
                 signal = True
                 trend = "LONG"
-            elif last_close < lower and allow_short:
+            elif last_close < lower and allow_short and is_24h_low:
                 signal = True
                 trend = "SHORT"
         elif mode != "disabled":
-            if trend == "LONG" and last_close > upper:
+            if trend == "LONG" and last_close > upper and is_24h_high:
                 signal = True
-            elif trend == "SHORT" and last_close < lower:
+            elif trend == "SHORT" and last_close < lower and is_24h_low:
                 signal = True
         else:
-            if last_close > upper:
+            if last_close > upper and is_24h_high:
                 signal = True
                 trend = "LONG"
-            elif last_close < lower:
+            elif last_close < lower and is_24h_low:
                 signal = True
                 trend = "SHORT"
 
         if not signal:
             return
-
-        if (
-            trend == "LONG"
-            and getattr(config, "LONG_REQUIRE_BULL_CANDLE", False)
-            and len(h_closed) >= 1
-        ):
-            last_bar = h_closed.iloc[-1]
-            if float(last_bar["close"]) <= float(last_bar["open"]):
-                return
 
         current_bar = hourly_df[hourly_df["open_time"] == current_ts]
         if current_bar.empty:
@@ -334,27 +328,8 @@ class BacktestEngine:
         self.balance -= self.position_size
         self.balance -= fee
 
-    def _get_atr_at_hour(self, symbol: str, hour_ts: int, hourly_df: pd.DataFrame) -> float:
-        """Cached ATR at start of a given hour (uses last closed hourly bars)."""
-        key = (symbol, hour_ts)
-        if key in self._atr_cache:
-            return self._atr_cache[key]
-        h_closed = hourly_df[hourly_df["open_time"] < hour_ts]
-        if len(h_closed) < self.atr_period + 1:
-            self._atr_cache[key] = 0.0
-            return 0.0
-        kline_list = h_closed.tail(self.atr_period + 2).values.tolist()
-        atr = calculate_atr(kline_list, self.atr_period)
-        self._atr_cache[key] = atr
-        return atr
-
     def _check_stops_minute(self, minute_ts: int):
-        """Stop check at a polling tick. Matches production: bot only sees the
-        live price at each poll, so we use the minute bar's close as the sample
-        and trigger on that. A longer stride (2m/3m) means some intervening
-        price spikes are invisible — exactly the blind spot being benchmarked.
-        """
-        HOUR_MS = 3600_000
+        """Stop check at a polling tick using fixed SL and trailing TP."""
         to_close = []
         for pos in self.positions:
             if pos.symbol not in self._minute_data:
@@ -373,35 +348,27 @@ class BacktestEngine:
             if current_price < pos.lowest_price:
                 pos.lowest_price = current_price
 
-            hour_ts = (minute_ts // HOUR_MS) * HOUR_MS
-            hourly_df = self._hourly_data.get(pos.symbol)
-            if hourly_df is None:
-                continue
-            atr = self._get_atr_at_hour(pos.symbol, hour_ts, hourly_df)
-            if atr <= 0:
+            extreme_price = pos.highest_price if pos.side == "LONG" else pos.lowest_price
+
+            if check_fixed_sl(pos.side, pos.entry_price, current_price, self.fixed_stop_loss_pct):
+                exit_price = apply_slippage(current_price, pos.side, is_entry=False)
+                to_close.append((pos, exit_price, "fixed_sl", minute_ts))
                 continue
 
-            triggered = should_stop_loss(
+            trail_triggered, newly_activated = check_trailing_tp(
                 side=pos.side,
-                highest_price=pos.highest_price,
-                lowest_price=pos.lowest_price,
+                entry_price=pos.entry_price,
+                extreme_price=extreme_price,
                 current_price=current_price,
-                atr=atr,
-                atr_multiplier=self.atr_multiplier,
-                max_stop_pct=self.max_stop_pct,
+                trailing_activated=pos.trailing_activated,
+                activation_pct=self.trailing_activation_pct,
+                drawdown_pct=self.trailing_drawdown_pct,
             )
-            if triggered:
-                exit_reason = "atr_stop"
-                if pos.side == "LONG":
-                    hard_stop = pos.highest_price * (1 - self.max_stop_pct)
-                    if current_price <= hard_stop:
-                        exit_reason = "hard_stop"
-                else:
-                    hard_stop = pos.lowest_price * (1 + self.max_stop_pct)
-                    if current_price >= hard_stop:
-                        exit_reason = "hard_stop"
+            if newly_activated:
+                pos.trailing_activated = True
+            if trail_triggered:
                 exit_price = apply_slippage(current_price, pos.side, is_entry=False)
-                to_close.append((pos, exit_price, exit_reason, minute_ts))
+                to_close.append((pos, exit_price, "trailing_tp", minute_ts))
 
         for pos, exit_price, reason, ts in to_close:
             self._close_position(pos, exit_price, reason, ts)
@@ -424,31 +391,27 @@ class BacktestEngine:
             if current_price < pos.lowest_price:
                 pos.lowest_price = current_price
 
-            atr = self._get_atr_at_hour(pos.symbol, current_ts, hourly_df)
-            if atr <= 0:
+            extreme_price = pos.highest_price if pos.side == "LONG" else pos.lowest_price
+
+            if check_fixed_sl(pos.side, pos.entry_price, current_price, self.fixed_stop_loss_pct):
+                exit_price = apply_slippage(current_price, pos.side, is_entry=False)
+                to_close.append((pos, exit_price, "fixed_sl", current_ts))
                 continue
 
-            triggered = should_stop_loss(
+            trail_triggered, newly_activated = check_trailing_tp(
                 side=pos.side,
-                highest_price=pos.highest_price,
-                lowest_price=pos.lowest_price,
+                entry_price=pos.entry_price,
+                extreme_price=extreme_price,
                 current_price=current_price,
-                atr=atr,
-                atr_multiplier=self.atr_multiplier,
-                max_stop_pct=self.max_stop_pct,
+                trailing_activated=pos.trailing_activated,
+                activation_pct=self.trailing_activation_pct,
+                drawdown_pct=self.trailing_drawdown_pct,
             )
-            if triggered:
+            if newly_activated:
+                pos.trailing_activated = True
+            if trail_triggered:
                 exit_price = apply_slippage(current_price, pos.side, is_entry=False)
-                exit_reason = "atr_stop"
-                if pos.side == "LONG":
-                    hard_stop = pos.highest_price * (1 - self.max_stop_pct)
-                    if current_price <= hard_stop:
-                        exit_reason = "hard_stop"
-                else:
-                    hard_stop = pos.lowest_price * (1 + self.max_stop_pct)
-                    if current_price >= hard_stop:
-                        exit_reason = "hard_stop"
-                to_close.append((pos, exit_price, exit_reason, current_ts))
+                to_close.append((pos, exit_price, "trailing_tp", current_ts))
 
         for pos, exit_price, reason, ts in to_close:
             self._close_position(pos, exit_price, reason, ts)

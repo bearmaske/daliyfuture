@@ -57,12 +57,8 @@ def run_one(cfg: dict, data: dict) -> dict:
     # Temporarily override config
     old_mode = config.TREND_FILTER_MODE
     old_sma = config.SMA_PERIOD
-    old_vol = config.VOL_FILTER_ENABLED
-    old_vol_thresh = config.VOL_ATR_THRESHOLD
     config.TREND_FILTER_MODE = cfg["trend_mode"]
     config.SMA_PERIOD = cfg["sma_period"]
-    config.VOL_FILTER_ENABLED = cfg.get("vol_filter", False)
-    config.VOL_ATR_THRESHOLD = cfg.get("vol_threshold", 1.0)
 
     try:
         engine = BacktestEngine(
@@ -80,8 +76,6 @@ def run_one(cfg: dict, data: dict) -> dict:
     finally:
         config.TREND_FILTER_MODE = old_mode
         config.SMA_PERIOD = old_sma
-        config.VOL_FILTER_ENABLED = old_vol
-        config.VOL_ATR_THRESHOLD = old_vol_thresh
 
 
 def format_report(results: list[dict]) -> str:

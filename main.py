@@ -23,8 +23,11 @@ def main():
     logger.info("[配置] 交易模式: %s", mode_label)
     logger.info("[配置] 初始资金: $%.2f | 单仓: $%.2f | 最大持仓: %d",
                 config.INITIAL_CAPITAL, config.POSITION_SIZE, config.MAX_POSITIONS)
-    logger.info("[配置] 杠杆: %dx | ATR止损: %d周期 × %.1f倍 | 兜底: %.1f%%",
-                config.LEVERAGE, config.ATR_PERIOD, config.ATR_MULTIPLIER, config.MAX_STOP_LOSS * 100)
+    logger.info("[配置] 杠杆: %dx | 固定止损: %.1f%% | 移动止盈: 激活≥%.1f%% 回撤≥%.1f%%",
+                config.LEVERAGE,
+                config.FIXED_STOP_LOSS_PCT * 100,
+                config.TRAILING_ACTIVATION_PCT * 100,
+                config.TRAILING_DRAWDOWN_PCT * 100)
     logger.info("[配置] 布林带: SMA%d ± %.1fσ | 扫描前 %d 大成交量币种",
                 config.BB_PERIOD, config.BB_STD, config.TOP_SYMBOLS_COUNT)
 

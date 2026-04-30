@@ -166,9 +166,9 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
     top_symbols = exchange.get_top_symbols()
     volume_map = exchange.get_volume_map(top_symbols)
     logger.info("=" * 60)
-    logger.info("[策略] 开始扫描 %d 个币种 | 余额: $%.2f | 持仓: %d/%d | 过滤模式: %s | 波动率过滤: %s",
+    logger.info("[策略] 开始扫描 %d 个币种 | 余额: $%.2f | 持仓: %d/%d | 过滤模式: %s",
                 len(top_symbols), state_mgr.balance, state_mgr.position_count, config.MAX_POSITIONS,
-                config.TREND_FILTER_MODE, "ON" if config.VOL_FILTER_ENABLED else "OFF")
+                config.TREND_FILTER_MODE)
 
     skip_counts = {
         "已持仓": 0,
@@ -177,8 +177,7 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
         "日线数据不足": 0,
         "无明确趋势": 0,
         "小时线数据不足": 0,
-        "波动率收缩": 0,
-        "阴线不开多": 0,
+        "24H高低不满足": 0,
         "无突破": 0,
         "异常": 0,
     }
@@ -187,11 +186,11 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
     daily_kline_limit = config.SMA_PERIOD + 3
     # Rolling SMA needs SMA_PERIOD*24 + slope-step 24h + unclosed bar
     rolling_hours_needed = config.SMA_PERIOD * 24 + 24
-    # Need enough bars for BB / volatility filter ATR / rolling trend
-    hourly_bars_needed = max(config.BB_PERIOD, config.VOL_ATR_LONG + 1) if config.VOL_FILTER_ENABLED else config.BB_PERIOD
+    # Need: BB_PERIOD closed bars + 24 lookback bars + 1 signal bar + 1 unclosed
+    hourly_bars_needed = max(config.BB_PERIOD, 25)  # 25 = 24 lookback + 1 signal bar
     if config.TREND_FILTER_MODE == "rolling_sma":
         hourly_bars_needed = max(hourly_bars_needed, rolling_hours_needed)
-    hourly_kline_limit = hourly_bars_needed + 2  # +1 for calc, +1 to discard unclosed candle
+    hourly_kline_limit = hourly_bars_needed + 1  # +1 to discard unclosed candle
 
     # Phase 1: scan all symbols and collect signals
     signals = []
@@ -285,47 +284,40 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
                         continue
                     _, d_middle, _ = calculate_bollinger_bands(daily_closes, config.SMA_PERIOD, config.BB_STD)
 
-            s_atr = l_atr = 0.0
-            ratio = 0.0
-            if config.VOL_FILTER_ENABLED:
-                closed_klines = hourly_klines[:-1]  # drop unclosed candle
-                expanding, s_atr, l_atr, ratio = check_volatility_expanding(
-                    closed_klines, config.VOL_ATR_SHORT, config.VOL_ATR_LONG, config.VOL_ATR_THRESHOLD
-                )
-                if not expanding:
-                    logger.info("[跳过] %s | 原因: 波动率收缩 (ATR%d=%.6f / ATR%d=%.6f, 比值 %.2f < %.1f)",
-                                symbol, config.VOL_ATR_SHORT, s_atr,
-                                config.VOL_ATR_LONG, l_atr, ratio, config.VOL_ATR_THRESHOLD)
-                    skip_counts["波动率收缩"] += 1
-                    continue
-
             h_upper, h_middle, h_lower = calculate_bollinger_bands(hourly_closes, config.BB_PERIOD, config.BB_STD)
             current_close = hourly_closes[-1]
             current_price = exchange.get_price(symbol)
-            # Last closed 1H bar (hourly_klines[-1] is unclosed, already dropped)
-            last_closed_open = float(hourly_klines[-2][1])
-            bull_candle = current_close > last_closed_open
+
+            # 24-bar high/low breakout confirmation
+            # hourly_klines[-1] = unclosed, [-2] = signal bar, [-26:-2] = 24 prior bars
+            signal_bar = hourly_klines[-2]
+            signal_high = float(signal_bar[2])
+            signal_low = float(signal_bar[3])
+            lookback_klines = hourly_klines[-26:-2]
+            if len(lookback_klines) >= 24:
+                lookback_highs = [float(k[2]) for k in lookback_klines]
+                lookback_lows = [float(k[3]) for k in lookback_klines]
+                is_24h_high = signal_high >= max(lookback_highs)
+                is_24h_low = signal_low <= min(lookback_lows)
+            else:
+                is_24h_high = is_24h_low = False
 
             if mode != "disabled":
-                if trend == "LONG" and current_close > h_upper:
+                if trend == "LONG" and current_close > h_upper and is_24h_high:
                     signal = True
-                elif trend == "SHORT" and current_close < h_lower:
+                elif trend == "SHORT" and current_close < h_lower and is_24h_low:
                     signal = True
                 else:
                     signal = False
             else:
-                if current_close > h_upper:
+                if current_close > h_upper and is_24h_high:
                     signal = True
                     trend = "LONG"
-                elif current_close < h_lower:
+                elif current_close < h_lower and is_24h_low:
                     signal = True
                     trend = "SHORT"
-
-            if signal and trend == "LONG" and config.LONG_REQUIRE_BULL_CANDLE and not bull_candle:
-                logger.info("[跳过] %s | 原因: LONG信号但上一根1H为阴线 (开:%.4f 收:%.4f)",
-                            symbol, last_closed_open, current_close)
-                skip_counts["阴线不开多"] += 1
-                signal = False
+                else:
+                    signal = False
 
             vol = volume_map.get(symbol, 0.0)
             bb_width_pct = (h_upper - h_lower) / h_middle * 100 if h_middle else 0
@@ -334,24 +326,30 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
             logger.info(
                 "[扫描] %s | 趋势: %s | 现价: %.4f | 日线中轨: %.4f | "
                 "1H收盘: %.4f | BB上/中/下: %.4f/%.4f/%.4f | 带宽 %.2f%% | 位置 %+.0f%% | "
-                "波动率比 %.2f | 24h量: $%.1fM | %s",
+                "24H高: %.4f(%s) | 24H低: %.4f(%s) | 24h量: $%.1fM | %s",
                 symbol, trend or "-", current_price, d_middle,
                 current_close, h_upper, h_middle, h_lower,
                 bb_width_pct, close_to_upper_pct,
-                ratio if config.VOL_FILTER_ENABLED else 0.0,
+                signal_high, "✓" if is_24h_high else "✗",
+                signal_low, "✓" if is_24h_low else "✗",
                 vol / 1e6,
                 signal_tag,
             )
 
-            if signal:
-                signals.append({
-                    "symbol": symbol,
-                    "trend": trend,
-                    "price": current_price,
-                    "volume": vol,
-                })
-            else:
-                skip_counts["无突破"] += 1
+            if not signal:
+                # Distinguish BB break without 24H confirmation vs no BB break
+                if (trend == "LONG" and current_close > h_upper) or (trend == "SHORT" and current_close < h_lower):
+                    skip_counts["24H高低不满足"] += 1
+                else:
+                    skip_counts["无突破"] += 1
+                continue
+
+            signals.append({
+                "symbol": symbol,
+                "trend": trend,
+                "price": current_price,
+                "volume": vol,
+            })
 
         except Exception as e:
             logger.error("[策略] %s 处理异常: %s", symbol, e)

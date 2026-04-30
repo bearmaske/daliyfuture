@@ -1,92 +1,77 @@
 import pytest
-from risk import should_stop_loss, calculate_atr
+from risk import check_fixed_sl, check_trailing_tp
 
 
-def test_long_atr_stop_triggered():
-    result = should_stop_loss(
+def test_fixed_sl_long_not_triggered():
+    assert check_fixed_sl("LONG", 100.0, 98.5, 0.02) is False
+
+
+def test_fixed_sl_long_triggered():
+    assert check_fixed_sl("LONG", 100.0, 97.9, 0.02) is True
+
+
+def test_fixed_sl_short_not_triggered():
+    assert check_fixed_sl("SHORT", 100.0, 101.5, 0.02) is False
+
+
+def test_fixed_sl_short_triggered():
+    assert check_fixed_sl("SHORT", 100.0, 102.1, 0.02) is True
+
+
+def test_trailing_tp_long_activates_and_triggers():
+    # profit >= 3%, extreme pulled back 1%
+    triggered, newly_activated = check_trailing_tp(
         side="LONG",
-        highest_price=100.0,
-        lowest_price=90.0,
-        current_price=96.0,
-        atr=2.5,
-        atr_multiplier=2.0,
-        max_stop_pct=0.06,
+        entry_price=100.0,
+        extreme_price=104.0,
+        current_price=102.9,
+        trailing_activated=False,
+        activation_pct=0.03,
+        drawdown_pct=0.01,
     )
-    # stop_price = max(100 - 2*2.5, 100*0.94) = max(95, 94) = 95
-    # 96 > 95 → not triggered
-    assert result is False
+    # profit = 2.9% < 3% → not activated yet, no trigger
+    assert newly_activated is False
+    assert triggered is False
 
 
-def test_long_atr_stop_triggered_below():
-    result = should_stop_loss(
+def test_trailing_tp_long_profit_activates():
+    triggered, newly_activated = check_trailing_tp(
         side="LONG",
-        highest_price=100.0,
-        lowest_price=90.0,
-        current_price=94.5,
-        atr=2.5,
-        atr_multiplier=2.0,
-        max_stop_pct=0.06,
+        entry_price=100.0,
+        extreme_price=103.5,
+        current_price=103.5,
+        trailing_activated=False,
+        activation_pct=0.03,
+        drawdown_pct=0.01,
     )
-    # stop_price = 95, current 94.5 <= 95 → triggered
-    assert result is True
+    # profit = 3.5% >= 3% → activates, current == extreme → not triggered yet
+    assert newly_activated is True
+    assert triggered is False
 
 
-def test_long_hard_cap_triggers_first():
-    # ATR would allow wider stop, but 6% cap is tighter
-    result = should_stop_loss(
+def test_trailing_tp_long_triggered_after_activation():
+    triggered, newly_activated = check_trailing_tp(
         side="LONG",
-        highest_price=100.0,
-        lowest_price=90.0,
-        current_price=93.5,
-        atr=5.0,
-        atr_multiplier=2.0,
-        max_stop_pct=0.06,
+        entry_price=100.0,
+        extreme_price=105.0,
+        current_price=103.9,
+        trailing_activated=True,
+        activation_pct=0.03,
+        drawdown_pct=0.01,
     )
-    # atr_stop = 100 - 10 = 90, hard_stop = 94 → stop_price = 94
-    # 93.5 <= 94 → triggered by hard cap
-    assert result is True
+    # trail_stop = 105 * 0.99 = 103.95; 103.9 <= 103.95 → triggered
+    assert triggered is True
 
 
-def test_short_atr_stop_triggered():
-    result = should_stop_loss(
+def test_trailing_tp_short_triggers():
+    triggered, newly_activated = check_trailing_tp(
         side="SHORT",
-        highest_price=110.0,
-        lowest_price=100.0,
-        current_price=105.5,
-        atr=2.5,
-        atr_multiplier=2.0,
-        max_stop_pct=0.06,
+        entry_price=100.0,
+        extreme_price=96.0,
+        current_price=97.0,
+        trailing_activated=True,
+        activation_pct=0.03,
+        drawdown_pct=0.01,
     )
-    # stop_price = min(100 + 5, 106) = 105
-    # 105.5 >= 105 → triggered
-    assert result is True
-
-
-def test_short_atr_stop_not_triggered():
-    result = should_stop_loss(
-        side="SHORT",
-        highest_price=110.0,
-        lowest_price=100.0,
-        current_price=103.0,
-        atr=2.5,
-        atr_multiplier=2.0,
-        max_stop_pct=0.06,
-    )
-    # stop_price = 105, 103 < 105 → safe
-    assert result is False
-
-
-def test_calculate_atr():
-    # Simulated klines: [open_time, open, high, low, close, volume]
-    klines = []
-    for i in range(16):
-        klines.append([0, 100, 105, 95, 100, 1000])
-    atr = calculate_atr(klines, period=14)
-    # TR = max(105-95, |105-100|, |95-100|) = 10 for each bar
-    assert abs(atr - 10.0) < 0.01
-
-
-def test_calculate_atr_insufficient_data():
-    klines = [[0, 100, 105, 95, 100, 1000]] * 5
-    atr = calculate_atr(klines, period=14)
-    assert atr == 0.0
+    # trail_stop = 96 * 1.01 = 96.96; 97.0 >= 96.96 → triggered
+    assert triggered is True

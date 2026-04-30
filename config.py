@@ -29,10 +29,10 @@ class Config:
     MAX_POSITIONS: int = 10
     LEVERAGE: int = 5
 
-    # ATR Trailing Stop
-    ATR_PERIOD: int = 14
-    ATR_MULTIPLIER: float = 2.0
-    MAX_STOP_LOSS: float = 0.06  # hard cap: 6% regardless of ATR
+    # Trailing TP + Fixed SL
+    TRAILING_ACTIVATION_PCT: float = 0.03   # activate trailing when profit >= 3%
+    TRAILING_DRAWDOWN_PCT: float = 0.01     # exit when price retraces 1% from extreme
+    FIXED_STOP_LOSS_PCT: float = 0.02       # fixed stop loss 2% from entry
 
     # Global Drawdown Circuit Breaker
     MAX_DRAWDOWN_PCT: float = 0.20  # force-close all if total assets drop 20% from initial
@@ -47,23 +47,12 @@ class Config:
     POSITION_RISK_BLACKLIST_HOURS: int = 24
 
     # Trend Filter: "sma" = SMA slope, "bb_middle" = price vs daily BB middle, "disabled" = no filter
-    TREND_FILTER_MODE: str = "sma"
+    TREND_FILTER_MODE: str = "bb_middle"
     SMA_PERIOD: int = 20  # SMA period for daily trend check (independent of BB_PERIOD)
-
-    # Volatility Filter: skip entry when ATR is contracting (low-vol regime)
-    VOL_FILTER_ENABLED: bool = True
-    VOL_ATR_SHORT: int = 7    # short-term ATR window (recent volatility)
-    VOL_ATR_LONG: int = 28    # long-term ATR window (baseline volatility)
-    VOL_ATR_THRESHOLD: float = 1.2  # short/long ratio must be >= this to allow entry
 
     # Bollinger Bands
     BB_PERIOD: int = 20
     BB_STD: float = 2.0
-
-    # Candle-color filter: if the last closed 1H candle is bearish (close < open),
-    # skip LONG entries. Avoids buying into a bar that closed down despite breaking
-    # the upper band (late breakout / fake-out).
-    LONG_REQUIRE_BULL_CANDLE: bool = True
 
     # Scanning
     TOP_SYMBOLS_COUNT: int = 50
