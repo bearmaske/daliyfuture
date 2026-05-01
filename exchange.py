@@ -229,14 +229,14 @@ class Exchange:
                                   position_side: str = None) -> dict:
         """Place a TRAILING_STOP_MARKET order (exchange-side trailing TP).
 
-        activation_price: price at which trailing starts (entry * 1.03 for LONG)
-        callback_rate: trailing drawdown % in percentage units (1.0 = 1%)
-        workingType=MARK_PRICE avoids wick-spike triggers.
+        Only supported on mainnet — testnet does not support this order type.
+        Raises RuntimeError in paper mode so callers fall back to local logic.
         """
-        mode_label = "LIVE" if config.is_live else "PAPER"
+        if not config.is_live:
+            raise RuntimeError("TRAILING_STOP_MARKET not supported on testnet — using local fallback")
         logger.info(
-            "[%s] Placing TRAILING_STOP_MARKET %s: %s qty=%g activationPrice=%.4f callbackRate=%.1f%%",
-            mode_label, side, symbol, quantity, activation_price, callback_rate,
+            "[LIVE] Placing TRAILING_STOP_MARKET %s: %s qty=%g activationPrice=%.4f callbackRate=%.1f%%",
+            side, symbol, quantity, activation_price, callback_rate,
         )
         params = dict(
             symbol=symbol,
@@ -257,20 +257,26 @@ class Exchange:
 
     def place_stop_order(self, symbol: str, side: str, quantity: float,
                          stop_price: float, position_side: str = None) -> dict:
-        """Place a STOP_MARKET order (exchange-side fixed stop loss)."""
-        mode_label = "LIVE" if config.is_live else "PAPER"
-        logger.info("[%s] Placing STOP_MARKET %s: %s qty=%g stopPrice=%.4f positionSide=%s",
-                    mode_label, side, symbol, quantity, stop_price, position_side or "BOTH")
+        """Place a STOP_MARKET order (exchange-side fixed stop loss).
+
+        Only supported on mainnet — testnet does not support this order type.
+        Raises RuntimeError in paper mode so callers fall back to local logic.
+        """
+        if not config.is_live:
+            raise RuntimeError("STOP_MARKET not supported on testnet — using local fallback")
+        logger.info("[LIVE] Placing STOP_MARKET %s: %s qty=%g stopPrice=%.4f positionSide=%s",
+                    side, symbol, quantity, stop_price, position_side or "BOTH")
         params = dict(
             symbol=symbol,
             side=side,
             type="STOP_MARKET",
             quantity=quantity,
             stopPrice=stop_price,
-            timeInForce="GTE_GTC",
         )
         if self._is_hedge_mode():
             params["positionSide"] = position_side or "BOTH"
+        else:
+            params["reduceOnly"] = "true"
         return self._retry(
             lambda: self.trading_client.futures_create_order(**params)
         )
