@@ -310,19 +310,25 @@ class Exchange:
         resp = self._get_algo_order(order_id)
         algo_status = resp.get("algoStatus", "")
         # Map algoStatus → status names used in risk.py
+        # FINISHED = algo order triggered and the actual market order filled
         status_map = {
             "NEW": "NEW",
             "WORKING": "NEW",
+            "FINISHED": "FILLED",   # triggered and executed
             "FILLED": "FILLED",
             "CANCELLED": "CANCELED",
+            "CANCELED": "CANCELED",
             "EXPIRED": "EXPIRED",
             "FAILED": "CANCELED",
         }
         status = status_map.get(algo_status, algo_status)
+        # algo orders use actualPrice/actualQty for fill info
+        avg_price = float(resp.get("actualPrice") or resp.get("avgPrice") or 0)
+        exec_qty = float(resp.get("actualQty") or resp.get("executedQty") or 0)
         return {
             "status": status,
-            "avgPrice": float(resp.get("avgPrice") or 0),
-            "executedQty": float(resp.get("executedQty") or 0),
+            "avgPrice": avg_price,
+            "executedQty": exec_qty,
         }
 
     def cancel_order(self, symbol: str, order_id: int) -> None:
