@@ -471,10 +471,15 @@ def _open_position(
         except Exception:
             pass
 
+        sl_price = (
+            fill_price * (1 - config.FIXED_STOP_LOSS_PCT) if side == "LONG"
+            else fill_price * (1 + config.FIXED_STOP_LOSS_PCT)
+        )
         notify(
             f"开仓 {side}",
             f"{symbol} | 成交价 {fill_price:.4f} | 数量 {executed_qty:g} | "
-            f"保证金 ${config.POSITION_SIZE}{funding_msg}",
+            f"保证金 ${config.POSITION_SIZE}\n"
+            f"固定止损: {sl_price:.4f} ({config.FIXED_STOP_LOSS_PCT*100:.0f}%){funding_msg}",
         )
     except BinanceAPIException as e:
         if getattr(e, "code", None) in POSITION_RISK_ERROR_CODES:

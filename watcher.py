@@ -10,7 +10,7 @@ Only handles activation — order status polling stays in check_stop_loss().
 import threading
 from binance import ThreadedWebsocketManager
 from config import config
-from notifier import logger
+from notifier import notify, logger
 
 
 class MarkPriceWatcher:
@@ -137,6 +137,22 @@ class MarkPriceWatcher:
             # Import here to avoid circular import at module load time
             from risk import _place_trailing_order
             _place_trailing_order(self.exchange, self.state_mgr, pos, extreme_price)
+
+            profit_pct = (
+                (mark_price - pos["entry_price"]) / pos["entry_price"] * 100
+                if pos["side"] == "LONG"
+                else (pos["entry_price"] - mark_price) / pos["entry_price"] * 100
+            )
+            trail_stop = (
+                extreme_price * (1 - config.TRAILING_DRAWDOWN_PCT)
+                if pos["side"] == "LONG"
+                else extreme_price * (1 + config.TRAILING_DRAWDOWN_PCT)
+            )
+            notify(
+                f"移动止盈已激活 {pos['side']}",
+                f"{symbol} | 浮盈 +{profit_pct:.1f}% | 现价 {mark_price:.4f}\n"
+                f"激活价 {extreme_price:.4f} | 止盈线 {trail_stop:.4f} (回撤 {config.TRAILING_DRAWDOWN_PCT*100:.0f}%)",
+            )
 
             # Unsubscribe — trailing order is now on the exchange
             with self._lock:

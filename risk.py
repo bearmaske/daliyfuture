@@ -311,6 +311,21 @@ def check_stop_loss(exchange: Exchange, state_mgr: StateManager):
                 _place_trailing_order(exchange, state_mgr, pos, extreme_price)
                 trailing_order_id = pos.get("trailing_order_id")
                 trailing_label = "移动止盈已激活" if trailing_order_id else "激活-挂单失败(本地兜底)"
+                trail_stop = (
+                    extreme_price * (1 - config.TRAILING_DRAWDOWN_PCT)
+                    if pos["side"] == "LONG"
+                    else extreme_price * (1 + config.TRAILING_DRAWDOWN_PCT)
+                )
+                act_profit_pct = (
+                    (current_price - pos["entry_price"]) / pos["entry_price"] * 100
+                    if pos["side"] == "LONG"
+                    else (pos["entry_price"] - current_price) / pos["entry_price"] * 100
+                )
+                notify(
+                    f"移动止盈已激活 {pos['side']}",
+                    f"{pos['symbol']} | 浮盈 +{act_profit_pct:.1f}% | 现价 {current_price:.4f}\n"
+                    f"激活价 {extreme_price:.4f} | 止盈线 {trail_stop:.4f} (回撤 {config.TRAILING_DRAWDOWN_PCT*100:.0f}%)",
+                )
                 if not trailing_order_id:
                     # Placement failed — local fallback
                     trailing_triggered, _ = check_trailing_tp(
