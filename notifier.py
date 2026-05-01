@@ -45,7 +45,9 @@ class DailyFileHandler(logging.Handler):
         return self._handler
 
     def emit(self, record):
-        self._get_handler().emit(record)
+        h = self._get_handler()
+        h.emit(record)
+        h.flush()
 
     def close(self):
         if self._handler:
