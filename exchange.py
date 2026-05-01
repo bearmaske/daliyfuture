@@ -224,82 +224,113 @@ class Exchange:
         precision = int(round(-math.log10(tick))) if tick > 0 else 4
         return round(round(price / tick) * tick, precision)
 
+    def _algo_order(self, params: dict) -> dict:
+        """POST /fapi/v1/algoOrder — used for STOP_MARKET and TRAILING_STOP_MARKET.
+        Returns the algo order response (contains algoId, algoStatus, etc.)."""
+        return self._retry(
+            lambda: self.trading_client._request_futures_api(
+                "post", "algoOrder", signed=True, data=params
+            )
+        )
+
+    def _get_algo_order(self, algo_id: int) -> dict:
+        """GET /fapi/v1/algoOrder — query algo order status."""
+        return self._retry(
+            lambda: self.trading_client._request_futures_api(
+                "get", "algoOrder", signed=True, data={"algoId": algo_id}
+            )
+        )
+
+    def _cancel_algo_order(self, algo_id: int) -> None:
+        """DELETE /fapi/v1/algoOrder — cancel an algo order."""
+        self._retry(
+            lambda: self.trading_client._request_futures_api(
+                "delete", "algoOrder", signed=True, data={"algoId": algo_id}
+            )
+        )
+
     def place_trailing_stop_order(self, symbol: str, side: str, quantity: float,
                                   activation_price: float, callback_rate: float,
                                   position_side: str = None) -> dict:
-        """Place a TRAILING_STOP_MARKET order (exchange-side trailing TP).
+        """Place a TRAILING_STOP_MARKET algo order via /fapi/v1/algoOrder.
 
-        Only supported on mainnet — testnet does not support this order type.
-        Raises RuntimeError in paper mode so callers fall back to local logic.
+        Returns dict with 'orderId' key set to algoId for uniform handling.
         """
-        if not config.is_live:
-            raise RuntimeError("TRAILING_STOP_MARKET not supported on testnet — using local fallback")
+        mode_label = "LIVE" if config.is_live else "PAPER"
         logger.info(
-            "[LIVE] Placing TRAILING_STOP_MARKET %s: %s qty=%g activationPrice=%.4f callbackRate=%.1f%%",
-            side, symbol, quantity, activation_price, callback_rate,
+            "[%s] Placing TRAILING_STOP_MARKET %s: %s qty=%g activationPrice=%.4f callbackRate=%.1f%%",
+            mode_label, side, symbol, quantity, activation_price, callback_rate,
         )
         params = dict(
             symbol=symbol,
             side=side,
             type="TRAILING_STOP_MARKET",
+            algoType="CONDITIONAL",
             quantity=quantity,
-            activationPrice=activation_price,
+            triggerPrice=activation_price,
             callbackRate=callback_rate,
             workingType="MARK_PRICE",
         )
         if self._is_hedge_mode():
             params["positionSide"] = position_side or "BOTH"
-        else:
-            params["reduceOnly"] = "true"
-        return self._retry(
-            lambda: self.trading_client.futures_create_order(**params)
-        )
+        resp = self._algo_order(params)
+        resp["orderId"] = resp.get("algoId")
+        return resp
 
     def place_stop_order(self, symbol: str, side: str, quantity: float,
                          stop_price: float, position_side: str = None) -> dict:
-        """Place a STOP_MARKET order (exchange-side fixed stop loss).
+        """Place a STOP_MARKET algo order via /fapi/v1/algoOrder.
 
-        Only supported on mainnet — testnet does not support this order type.
-        Raises RuntimeError in paper mode so callers fall back to local logic.
+        Returns dict with 'orderId' key set to algoId for uniform handling.
         """
-        if not config.is_live:
-            raise RuntimeError("STOP_MARKET not supported on testnet — using local fallback")
-        logger.info("[LIVE] Placing STOP_MARKET %s: %s qty=%g stopPrice=%.4f positionSide=%s",
-                    side, symbol, quantity, stop_price, position_side or "BOTH")
+        mode_label = "LIVE" if config.is_live else "PAPER"
+        logger.info("[%s] Placing STOP_MARKET %s: %s qty=%g stopPrice=%.4f positionSide=%s",
+                    mode_label, side, symbol, quantity, stop_price, position_side or "BOTH")
         params = dict(
             symbol=symbol,
             side=side,
             type="STOP_MARKET",
+            algoType="CONDITIONAL",
             quantity=quantity,
-            stopPrice=stop_price,
+            triggerPrice=stop_price,
+            workingType="MARK_PRICE",
         )
         if self._is_hedge_mode():
             params["positionSide"] = position_side or "BOTH"
-        else:
-            params["reduceOnly"] = "true"
-        return self._retry(
-            lambda: self.trading_client.futures_create_order(**params)
-        )
+        resp = self._algo_order(params)
+        resp["orderId"] = resp.get("algoId")
+        return resp
 
     def get_order_status(self, symbol: str, order_id: int) -> dict:
-        """Return order info dict with at least 'status', 'avgPrice', 'executedQty'."""
-        resp = self._retry(lambda: self.trading_client.futures_get_order(
-            symbol=symbol, orderId=order_id
-        ))
+        """Query algo order status via GET /fapi/v1/algoOrder.
+
+        algoStatus values: NEW, WORKING, CANCELLED, FILLED, EXPIRED, FAILED.
+        Mapped to standard status names for uniform handling in risk.py.
+        """
+        resp = self._get_algo_order(order_id)
+        algo_status = resp.get("algoStatus", "")
+        # Map algoStatus → status names used in risk.py
+        status_map = {
+            "NEW": "NEW",
+            "WORKING": "NEW",
+            "FILLED": "FILLED",
+            "CANCELLED": "CANCELED",
+            "EXPIRED": "EXPIRED",
+            "FAILED": "CANCELED",
+        }
+        status = status_map.get(algo_status, algo_status)
         return {
-            "status": resp.get("status", ""),
+            "status": status,
             "avgPrice": float(resp.get("avgPrice") or 0),
             "executedQty": float(resp.get("executedQty") or 0),
         }
 
     def cancel_order(self, symbol: str, order_id: int) -> None:
-        """Cancel an open order. Silently ignores errors if already closed/filled."""
+        """Cancel an algo order via DELETE /fapi/v1/algoOrder."""
         try:
-            self._retry(lambda: self.trading_client.futures_cancel_order(
-                symbol=symbol, orderId=order_id
-            ))
+            self._cancel_algo_order(order_id)
         except Exception as e:
-            logger.debug("[撤单] %s #%s: %s", symbol, order_id, e)
+            logger.debug("[撤单] algoId=%s: %s", order_id, e)
 
     def place_order(self, symbol: str, side: str, quantity: float,
                     position_side: str = None) -> dict:
