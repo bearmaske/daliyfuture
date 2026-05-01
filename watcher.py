@@ -69,9 +69,12 @@ class MarkPriceWatcher:
 
     def _subscribe(self, symbol: str):
         """Must be called with self._lock held."""
-        key = self._twm.start_futures_socket(
+        from binance.enums import FuturesType
+        key = self._twm.start_symbol_mark_price_socket(
             callback=self._on_message,
-            payload=f"{symbol.lower()}@markPrice",
+            symbol=symbol,
+            fast=True,
+            futures_type=FuturesType.USD_M,
         )
         self._streams[symbol] = key
         logger.info("[WebSocket] 订阅 %s@markPrice", symbol)
