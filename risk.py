@@ -172,6 +172,65 @@ def _check_exchange_order(exchange, state_mgr, pos, order_id, reason,
     return False
 
 
+def _sync_positions_with_exchange(exchange: Exchange, state_mgr: StateManager):
+    """Compare local positions against exchange. For any local position that no
+    longer exists on the exchange, query its algo stop order to get the fill
+    price and record the close. This catches stop-loss triggers that happened
+    while the bot was offline or missed during polling."""
+    try:
+        exchange_positions = exchange.get_open_positions()
+    except Exception as e:
+        logger.warning("[同步] 获取交易所持仓失败，跳过同步: %s", e)
+        return
+
+    exchange_symbols = {p["symbol"] for p in exchange_positions}
+    local_positions = list(state_mgr.state.get("positions", []))
+
+    for pos in local_positions:
+        if pos["symbol"] in exchange_symbols:
+            continue  # still open, no action needed
+
+        # Position exists locally but not on exchange — it was closed
+        logger.info("[同步] %s %s 已在交易所平仓，同步本地状态", pos["symbol"], pos["side"])
+
+        fill_price = 0.0
+        executed_qty = pos["quantity"]
+        close_order_id = None
+        reason = "交易所止损(同步)"
+
+        # Try to get fill price from the algo stop order
+        for order_key, order_reason in [("stop_order_id", "固定止损"), ("trailing_order_id", "移动止盈")]:
+            order_id = pos.get(order_key)
+            if not order_id:
+                continue
+            try:
+                info = exchange.get_order_status(pos["symbol"], order_id)
+                if info["status"] == "FILLED" and info["avgPrice"] > 0:
+                    fill_price = info["avgPrice"]
+                    executed_qty = info["executedQty"] or executed_qty
+                    close_order_id = order_id
+                    reason = order_reason
+                    # Cancel the other order
+                    other_key = "trailing_order_id" if order_key == "stop_order_id" else "stop_order_id"
+                    other_id = pos.get(other_key)
+                    if other_id:
+                        exchange.cancel_order(pos["symbol"], other_id)
+                    break
+            except Exception as e:
+                logger.debug("[同步] 查询 %s 订单 %s 失败: %s", order_reason, order_id, e)
+
+        if fill_price <= 0:
+            # Couldn't get fill price from algo order — use last known price
+            try:
+                fill_price = exchange.get_price(pos["symbol"])
+            except Exception:
+                fill_price = pos["entry_price"]
+            logger.warning("[同步] %s 无法获取成交价，用当前价 %.4f 估算", pos["symbol"], fill_price)
+
+        _record_position_close(state_mgr, pos, fill_price, executed_qty, close_order_id, reason)
+        _notify_close(pos, fill_price, executed_qty, reason)
+
+
 def check_stop_loss(exchange: Exchange, state_mgr: StateManager):
     """Check all open positions.
 
@@ -181,6 +240,9 @@ def check_stop_loss(exchange: Exchange, state_mgr: StateManager):
     """
     if check_drawdown(exchange, state_mgr):
         return
+
+    # Sync local state with exchange first — catches stops triggered while offline
+    _sync_positions_with_exchange(exchange, state_mgr)
 
     positions = list(state_mgr.state.get("positions", []))
     if not positions:
