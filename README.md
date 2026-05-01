@@ -31,18 +31,20 @@
 | 激活式移动止盈 | `TRAILING_ACTIVATION_PCT = 3%` | 浮盈达到 3% 后激活，本地轮询触发 |
 | 移动止盈回撤 | `TRAILING_DRAWDOWN_PCT = 1%` | 激活后，从最有利价格回撤 1% 出场 |
 
-**固定止损**：开仓市价单成交后，立即向 Binance 挂一单 `STOP_MARKET`（止损价 = 入场价 ± 2%）。止损由交易所直接执行，不依赖 bot 在线。每 60 秒查询订单状态：
+**固定止损**：开仓后立即通过 `POST /fapi/v1/algoOrder`（`algoType=CONDITIONAL`）在 Binance 挂 `STOP_MARKET` 条件单（止损价 = 入场价 ± 2%）。止损由交易所直接执行，不依赖 bot 在线。每 60 秒查询订单状态：
 - `FILLED` → 本地记录平仓，撤销移动止盈单（OCO）
 - `CANCELED/EXPIRED` → 自动重新挂单
 - 查询失败 → 本地价格检查兜底
 
 **移动止盈**：两层机制配合，消除轮询盲区：
 
-1. **WebSocket 实时激活**（`watcher.py`）：后台订阅 `<symbol>@markPrice` 流，每秒收到标记价格。浮盈达到 3% 时立刻以**当时最高价**为激活价，挂 `TRAILING_STOP_MARKET`（回调率 1%，`workingType=MARK_PRICE`）。挂单成功后自动取消订阅。
+1. **WebSocket 实时激活**（`watcher.py`）：后台订阅 `<symbol>@markPrice` 流，每秒收到标记价格。浮盈达到 3% 时立刻以**当时最高价**为激活价，通过 `POST /fapi/v1/algoOrder` 挂 `TRAILING_STOP_MARKET`（回调率 1%，`workingType=MARK_PRICE`）。挂单成功后自动取消订阅。
 2. **交易所实时追踪**：`TRAILING_STOP_MARKET` 挂上后，交易所实时跟踪最高/最低价，回撤 1% 自动触发，不依赖 bot 轮询。
 3. **轮询兜底**（每 60 秒）：查询移动止盈单状态，`FILLED` 撤销固定止损单并记录平仓；`CANCELED/EXPIRED` 用当前极值价重新挂单；WebSocket 挂单失败时本地逻辑托底。
 
 两个交易所订单形成手动 OCO：任意一个触发，自动撤销另一个。
+
+> **接口说明**：Binance 已将 `STOP_MARKET` / `TRAILING_STOP_MARKET` 迁移至 Algo Order API（`/fapi/v1/algoOrder`），不再使用 `/fapi/v1/order`。主网和测试网均已支持。
 
 ### 全局风控
 
