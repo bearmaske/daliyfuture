@@ -10,7 +10,7 @@ from notifier import notify, logger
 # Error codes that mean "Binance itself is refusing to take a new long/short
 # position for this symbol right now" — treat as a strong market signal and
 # blacklist the symbol for POSITION_RISK_BLACKLIST_HOURS.
-POSITION_RISK_ERROR_CODES = {-4106, -4129, -4131}
+POSITION_RISK_ERROR_CODES = {-4106, -4129, -4131, -4411}
 
 
 def calculate_bollinger_bands(
