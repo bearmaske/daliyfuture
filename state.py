@@ -213,6 +213,16 @@ class StateManager:
         self.save()
         return False
 
+    def get_daily_balance_snapshot(self) -> float:
+        """Return the balance snapshot saved at the last midnight rebalance, or 0."""
+        return float(self.state.get("daily_balance_snapshot", 0))
+
+    def set_daily_balance_snapshot(self, balance: float):
+        """Save the current balance as the daily snapshot."""
+        with self._lock:
+            self.state["daily_balance_snapshot"] = balance
+        self.save()
+
     def add_symbol_blacklist(self, symbol: str, reason: str, hours: int):
         """Add `symbol` to an explicit blacklist for `hours`. If already present,
         extend the expiry only when the new expiry is later."""

@@ -69,6 +69,7 @@ class Exchange:
         self._load_exchange_info()
         tickers = self._retry(lambda: self.data_client.futures_ticker())
         top10_set = set(config.EXCLUDE_TOP10_SYMBOLS or [])
+        blacklist_set = set(config.SYMBOL_BLACKLIST or [])
         excluded_equity = config.EXCLUDE_EQUITY_PERPS
         min_vol = config.MIN_QUOTE_VOLUME_24H
         skipped_equity, skipped_top10 = [], []
@@ -78,6 +79,8 @@ class Exchange:
         for t in tickers:
             sym = t["symbol"]
             if not sym.endswith("USDT") or sym in config.STABLECOIN_FILTER:
+                continue
+            if sym in blacklist_set:
                 continue
             if excluded_equity and self._underlying_types.get(sym, "COIN") in ("EQUITY", "PREMARKET"):
                 skipped_equity.append(sym)

@@ -68,6 +68,11 @@ def main():
     scheduler.add_listener(job_error_listener, EVENT_JOB_ERROR)
 
     def strategy_job():
+        try:
+            summary = exchange.get_account_summary()
+            _check_daily_drawdown(summary["total_margin_balance"], state_mgr)
+        except Exception as e:
+            logger.warning("[风控] 日内跌幅检查失败: %s", e)
         run_strategy(exchange, state_mgr)
         watcher.update_subscriptions()
 
@@ -102,6 +107,18 @@ def main():
         id="heartbeat",
     )
 
+    scheduler.add_job(
+        _rebalance_position_size,
+        "cron",
+        hour=0,
+        minute=0,
+        timezone=TZ_CN,
+        args=[exchange, state_mgr],
+        id="rebalance",
+        max_instances=1,
+        misfire_grace_time=300,
+    )
+
     def shutdown(signum, frame):
         logger.info("Shutting down...")
         scheduler.shutdown(wait=False)
@@ -125,7 +142,7 @@ def main():
     wait_minutes = int((next_scan - now).total_seconds() / 60)
     wait_seconds = int((next_scan - now).total_seconds() % 60)
 
-    logger.info("[调度] 策略检查: 每小时 :01 | 止损监控: 每 %d 秒 | 心跳: 每 %d 小时",
+    logger.info("[调度] 策略检查: 每小时 :01 | 止损监控: 每 %d 秒 | 心跳: 每 %d 小时 | 调仓: 每日 00:00",
                 config.RISK_CHECK_INTERVAL_SECONDS, config.HEARTBEAT_INTERVAL_HOURS)
     logger.info("[调度] 首次策略扫描: %s (约 %d 分 %d 秒后)",
                 next_scan.strftime("%H:%M"), wait_minutes, wait_seconds)
@@ -141,6 +158,51 @@ def main():
         scheduler.start()
     except (KeyboardInterrupt, SystemExit):
         pass
+
+
+def _check_daily_drawdown(total_assets: float, state_mgr: StateManager) -> bool:
+    """对比当日 00:00 快照，若跌幅 ≥ 20% 则触发冷静期。返回是否触发。"""
+    snapshot = state_mgr.get_daily_balance_snapshot()
+    if snapshot <= 0:
+        return False
+    daily_drawdown = (snapshot - total_assets) / snapshot
+    logger.info("[风控] 当日快照: $%.2f | 当前总资产: $%.2f | 日内变动: %.2f%%",
+                snapshot, total_assets, -daily_drawdown * 100)
+    if daily_drawdown >= 0.20:
+        state_mgr.set_cooldown(hours=config.COOLDOWN_HOURS)
+        logger.warning("[风控] 日内跌幅 %.2f%% ≥ 20%%，触发冷静期 %dh",
+                       daily_drawdown * 100, config.COOLDOWN_HOURS)
+        notify("⚠ 日内亏损熔断",
+               f"日内跌幅: -{daily_drawdown * 100:.2f}%\n"
+               f"当日快照: ${snapshot:.2f} → 当前: ${total_assets:.2f}\n"
+               f"触发 {config.COOLDOWN_HOURS}h 冷静期，暂停开仓")
+        return True
+    return False
+
+
+def _rebalance_position_size(exchange: Exchange, state_mgr: StateManager):
+    """每日凌晨 00:00：① 保存当日余额快照；② 动态调整单仓金额。"""
+    try:
+        summary = exchange.get_account_summary()
+        total_assets = summary["total_margin_balance"]
+    except Exception as e:
+        logger.warning("[调仓] 获取账户资产失败，跳过调整: %s", e)
+        return
+
+    # 保存今日 00:00 快照（供每小时扫描比对）
+    state_mgr.set_daily_balance_snapshot(total_assets)
+    logger.info("[调仓] 已记录今日 00:00 快照: $%.2f", total_assets)
+
+    # --- 单仓金额调整 ---
+    new_size = int(total_assets * 0.05 / 10) * 10
+    if new_size <= 0:
+        logger.warning("[调仓] 计算结果 ≤ 0 (总资产 $%.2f)，跳过调整", total_assets)
+        return
+
+    old_size = config.POSITION_SIZE
+    config.POSITION_SIZE = float(new_size)
+    logger.info("[调仓] 总资产: $%.2f | 单仓: $%.0f → $%.0f (5%%)", total_assets, old_size, new_size)
+    notify("单仓金额更新", f"总资产: ${total_assets:.2f}\n单仓金额: ${old_size:.0f} → ${new_size:.0f} (5%)")
 
 
 def _backfill_commission(exchange: Exchange, state_mgr: StateManager, history: list):
@@ -219,6 +281,10 @@ def _heartbeat(exchange: Exchange, state_mgr: StateManager):
     unrealized_sign = "+" if total_unrealized_pnl >= 0 else ""
     lines.append(f"持仓未实现PnL: {unrealized_sign}${total_unrealized_pnl:.2f}")
     lines.append(f"初始资金: ${config.INITIAL_CAPITAL:.2f}")
+    snapshot = state_mgr.get_daily_balance_snapshot()
+    snapshot_str = f"${snapshot:.2f}" if snapshot > 0 else "未记录"
+    daily_chg = f"{(total_assets - snapshot) / snapshot * 100:+.2f}%" if snapshot > 0 else "N/A"
+    lines.append(f"单仓金额: ${config.POSITION_SIZE:.0f} (总资产5%) | 今日快照: {snapshot_str} | 日内变动: {daily_chg}")
 
     mode_label = "实盘" if config.is_live else "模拟盘"
     lines.append(f"--- 交易统计 ({mode_label}) ---")
