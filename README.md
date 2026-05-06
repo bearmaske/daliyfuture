@@ -201,8 +201,8 @@ daliyfuture/
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `INITIAL_CAPITAL` | 10000 | 初始资金（USDT） |
-| `POSITION_SIZE` | 500 | 单仓保证金（USDT），每日 00:00 动态调整为总资产 × 5%（向下取整到十位） |
+| `INITIAL_CAPITAL` | 8084 | 初始资金（USDT） |
+| `POSITION_SIZE` | 400 | 单仓保证金（USDT），每日 00:00 动态调整为总资产 × 5%（向下取整到十位） |
 | `MAX_POSITIONS` | 10 | 最大同时持仓数 |
 | `LEVERAGE` | 5 | 杠杆倍数 |
 

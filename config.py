@@ -24,8 +24,8 @@ class Config:
     PUSHDEER_KEYS: list = None
 
     # Capital & Position
-    INITIAL_CAPITAL: float = 10000.0
-    POSITION_SIZE: float = 500.0
+    INITIAL_CAPITAL: float = 8084.0
+    POSITION_SIZE: float = 400.0
     MAX_POSITIONS: int = 10
     LEVERAGE: int = 5
 
