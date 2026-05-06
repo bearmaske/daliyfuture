@@ -77,7 +77,7 @@ class Config:
     HEARTBEAT_INTERVAL_HOURS: int = 6
 
     # Strategy inception date (UTC+8) — drives "运行时长" in heartbeat
-    STRATEGY_START_TIME: str = "2026-05-01 00:00:00"
+    STRATEGY_START_TIME: str = "2026-05-06 21:00:00"
 
     # Files
     STATE_FILE: str = "state.json"
