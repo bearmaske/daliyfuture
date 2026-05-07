@@ -437,10 +437,9 @@ def _open_position(
                 fill_price * (1 - config.FIXED_STOP_LOSS_PCT) if side == "LONG"
                 else fill_price * (1 + config.FIXED_STOP_LOSS_PCT)
             )
-            sl_price = exchange.round_price(symbol, raw_sl)
-            if (side == "LONG" and sl_price >= fill_price) or (side == "SHORT" and sl_price <= fill_price):
-                logger.warning("[开仓] %s 止损价 %.8f 精度不足（与入场价相同），依赖本地轮询兜底",
-                               symbol, sl_price)
+            sl_price = exchange.round_stop_price(symbol, raw_sl, side)
+            if sl_price <= 0:
+                logger.warning("[开仓] %s 止损价为 0（tick 过大），依赖本地轮询兜底", symbol)
             else:
                 sl_order = exchange.place_stop_order(
                     symbol, close_side, executed_qty, sl_price, position_side=side

@@ -227,6 +227,19 @@ class Exchange:
         precision = int(round(-math.log10(tick))) if tick > 0 else 4
         return round(round(price / tick) * tick, precision)
 
+    def round_stop_price(self, symbol: str, price: float, side: str) -> float:
+        """Round stop loss price conservatively (always away from entry).
+
+        LONG stop (below entry): floor — avoids rounding *up* to entry price.
+        SHORT stop (above entry): ceil — avoids rounding *down* to entry price.
+        """
+        self._load_exchange_info()
+        tick = self._tick_sizes.get(symbol, 0.0001)
+        precision = int(round(-math.log10(tick))) if tick > 0 else 4
+        if side == "LONG":
+            return round(math.floor(price / tick) * tick, precision)
+        return round(math.ceil(price / tick) * tick, precision)
+
     def _algo_order(self, params: dict) -> dict:
         """POST /fapi/v1/algoOrder — used for STOP_MARKET and TRAILING_STOP_MARKET.
         Returns the algo order response (contains algoId, algoStatus, etc.)."""
