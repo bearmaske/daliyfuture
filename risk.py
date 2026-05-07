@@ -367,18 +367,31 @@ def check_stop_loss(exchange: Exchange, state_mgr: StateManager):
 def _replace_stop_order(exchange: Exchange, state_mgr, pos: dict):
     """Re-place the STOP_MARKET fixed SL order."""
     try:
-        sl_price = exchange.round_price(
-            pos["symbol"],
+        raw_sl = (
             pos["entry_price"] * (1 - config.FIXED_STOP_LOSS_PCT) if pos["side"] == "LONG"
-            else pos["entry_price"] * (1 + config.FIXED_STOP_LOSS_PCT),
+            else pos["entry_price"] * (1 + config.FIXED_STOP_LOSS_PCT)
         )
+        sl_price = exchange.round_price(pos["symbol"], raw_sl)
+
+        # round_price can round up to entry_price for ultra-low-price tokens
+        # (e.g. DOGSUSDT @ 0.0001 with 2% SL → 0.000098 rounds to 0.0001).
+        # Binance rejects a SELL stop whose triggerPrice >= mark price (-1102).
+        if pos["side"] == "LONG" and sl_price >= pos["entry_price"]:
+            logger.warning("[止损] %s 止损价 %.8f 精度不足（≥ 入场价），依赖本地轮询兜底",
+                           pos["symbol"], sl_price)
+            return
+        if pos["side"] == "SHORT" and sl_price <= pos["entry_price"]:
+            logger.warning("[止损] %s 止损价 %.8f 精度不足（≤ 入场价），依赖本地轮询兜底",
+                           pos["symbol"], sl_price)
+            return
+
         close_side = "SELL" if pos["side"] == "LONG" else "BUY"
         sl_order = exchange.place_stop_order(
             pos["symbol"], close_side, pos["quantity"], sl_price, position_side=pos["side"]
         )
         new_id = sl_order.get("orderId")
         state_mgr.set_stop_order_id(pos["id"], new_id)
-        logger.info("[止损] %s 新止损单 orderId=%s 止损价 %.4f", pos["symbol"], new_id, sl_price)
+        logger.info("[止损] %s 新止损单 orderId=%s 止损价 %.8f", pos["symbol"], new_id, sl_price)
     except Exception as e:
         logger.error("[止损] %s 重新挂止损单失败: %s", pos["symbol"], e)
 

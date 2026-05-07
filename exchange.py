@@ -230,9 +230,13 @@ class Exchange:
     def _algo_order(self, params: dict) -> dict:
         """POST /fapi/v1/algoOrder — used for STOP_MARKET and TRAILING_STOP_MARKET.
         Returns the algo order response (contains algoId, algoStatus, etc.)."""
+        # Use dict(params) inside the lambda so each retry gets a fresh copy.
+        # _request_futures_api mutates its `data` dict in-place (adds timestamp,
+        # recvWindow). If we reuse the same dict across retries, the stale
+        # timestamp gets included in the HMAC and -1022 fires on attempt 2+.
         return self._retry(
             lambda: self.trading_client._request_futures_api(
-                "post", "algoOrder", signed=True, data=params
+                "post", "algoOrder", signed=True, data=dict(params)
             )
         )
 

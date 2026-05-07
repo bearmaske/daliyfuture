@@ -433,16 +433,20 @@ def _open_position(
 
         # Fixed stop loss — STOP_MARKET at entry ± 2%
         try:
-            sl_price = exchange.round_price(
-                symbol,
+            raw_sl = (
                 fill_price * (1 - config.FIXED_STOP_LOSS_PCT) if side == "LONG"
-                else fill_price * (1 + config.FIXED_STOP_LOSS_PCT),
+                else fill_price * (1 + config.FIXED_STOP_LOSS_PCT)
             )
-            sl_order = exchange.place_stop_order(
-                symbol, close_side, executed_qty, sl_price, position_side=side
-            )
-            state_mgr.set_stop_order_id(pos["id"], sl_order.get("orderId"))
-            logger.info("[开仓] %s 止损单 orderId=%s 止损价 %.4f", symbol, sl_order.get("orderId"), sl_price)
+            sl_price = exchange.round_price(symbol, raw_sl)
+            if (side == "LONG" and sl_price >= fill_price) or (side == "SHORT" and sl_price <= fill_price):
+                logger.warning("[开仓] %s 止损价 %.8f 精度不足（与入场价相同），依赖本地轮询兜底",
+                               symbol, sl_price)
+            else:
+                sl_order = exchange.place_stop_order(
+                    symbol, close_side, executed_qty, sl_price, position_side=side
+                )
+                state_mgr.set_stop_order_id(pos["id"], sl_order.get("orderId"))
+                logger.info("[开仓] %s 止损单 orderId=%s 止损价 %.8f", symbol, sl_order.get("orderId"), sl_price)
         except Exception as e:
             logger.error("[开仓] %s 止损单下单失败: %s | 将由本地轮询兜底", symbol, e)
 
