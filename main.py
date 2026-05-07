@@ -1,3 +1,4 @@
+import os
 import signal
 import sys
 from apscheduler.schedulers.blocking import BlockingScheduler
@@ -14,8 +15,37 @@ from notifier import notify, logger
 
 TZ_CN = timezone(timedelta(hours=8))
 
+_PID_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), f"bot_{config.TRADING_MODE}.pid")
+
+
+def _acquire_pid_lock():
+    """Prevent two instances of the same TRADING_MODE from running simultaneously."""
+    if os.path.exists(_PID_FILE):
+        try:
+            with open(_PID_FILE) as f:
+                old_pid = int(f.read().strip())
+            # Check if that process is still alive
+            os.kill(old_pid, 0)
+            logger.error(
+                "另一个 %s 实例已在运行 (PID %d)，拒绝启动。如需强制重启请先删除 %s",
+                config.TRADING_MODE, old_pid, _PID_FILE,
+            )
+            sys.exit(1)
+        except (ProcessLookupError, ValueError):
+            pass  # stale PID file — previous process is gone
+    with open(_PID_FILE, "w") as f:
+        f.write(str(os.getpid()))
+
+
+def _release_pid_lock():
+    try:
+        os.remove(_PID_FILE)
+    except OSError:
+        pass
+
 
 def main():
+    _acquire_pid_lock()
     logger.info("=" * 60)
     mode_label = "实盘 LIVE" if config.is_live else "模拟盘 PAPER"
     logger.info("Starting DualTrend Bollinger Strategy Bot [%s]", mode_label)
@@ -124,6 +154,7 @@ def main():
         scheduler.shutdown(wait=False)
         watcher.stop()
         state_mgr.save()
+        _release_pid_lock()
         notify("Bot 停止", "DualTrend Bollinger Strategy Bot 已停止")
         sys.exit(0)
 
