@@ -82,7 +82,9 @@ class Exchange:
                 continue
             if sym in blacklist_set:
                 continue
-            if excluded_equity and self._underlying_types.get(sym, "COIN") in ("EQUITY", "PREMARKET"):
+            if excluded_equity and self._underlying_types.get(sym, "COIN") in (
+                "EQUITY", "PREMARKET", "COMMODITY", "INDEX"
+            ):
                 skipped_equity.append(sym)
                 continue
             if sym in top10_set:
@@ -91,7 +93,7 @@ class Exchange:
             eligible.append(t)
 
         if skipped_equity:
-            logger.info("[扫描] 跳过股票/预上市: %s", ", ".join(skipped_equity))
+            logger.info("[扫描] 跳过非加密合约（股票/预上市/商品/指数）: %s", ", ".join(skipped_equity))
         if skipped_top10:
             logger.info("[扫描] 跳过市值前10: %s", ", ".join(skipped_top10))
 

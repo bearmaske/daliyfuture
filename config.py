@@ -59,7 +59,9 @@ class Config:
     STABLECOIN_FILTER: list = None
     # Permanent symbol blacklist: always excluded from the scan pool regardless of volume.
     SYMBOL_BLACKLIST: list = None
-    # Skip tokenized stock + pre-IPO perpetuals (different dynamics, follow equity market)
+    # Skip non-crypto perpetuals: tokenized stocks (EQUITY), pre-IPO (PREMARKET),
+    # commodities (COMMODITY: 黄金/白银/原油/天然气/铜/钯/铂), indices (INDEX: BTCDOM 等).
+    # 这些跟随传统市场或 basket 行情，与币市动量策略不兼容。
     EXCLUDE_EQUITY_PERPS: bool = True
     # Skip crypto majors (too efficient, edge is in mid-cap momentum). Edit freely.
     EXCLUDE_TOP10_SYMBOLS: list = None
@@ -91,9 +93,7 @@ class Config:
         if self.SYMBOL_BLACKLIST is None:
             self.SYMBOL_BLACKLIST = [
                 "MEGAUSDT",
-                "XAUUSDT",   # TradFi协议未签署 (-4411)
-                "XAGUSDT",   # TradFi协议未签署 (-4411)
-                "BZUSDT",    # 布伦特原油，TradFi协议未签署 (-4411)
+                "PAXGUSDT",  # Paxos Gold 代币，underlyingType=COIN 但跟随黄金价格
             ]
         if self.EXCLUDE_TOP10_SYMBOLS is None:
             # Empty by default — top 10 majors are included in the scan pool
