@@ -87,6 +87,7 @@ class BacktestEngine:
         trailing_drawdown_pct: float = config.TRAILING_DRAWDOWN_PCT,
         fixed_stop_loss_pct: float = config.FIXED_STOP_LOSS_PCT,
         stop_check_minutes: int = 60,
+        trend_timeframe_hours: int = 24,
     ):
         self.initial_capital = initial_capital
         self.balance = initial_capital
@@ -100,6 +101,8 @@ class BacktestEngine:
         self.trailing_drawdown_pct = trailing_drawdown_pct
         self.fixed_stop_loss_pct = fixed_stop_loss_pct
         self.stop_check_minutes = stop_check_minutes
+        self.trend_timeframe_hours = trend_timeframe_hours
+        self._trend_tf_ms = trend_timeframe_hours * 3600_000
 
         self.positions: list[BacktestPosition] = []
         self.trades: list[BacktestTrade] = []
@@ -238,8 +241,8 @@ class BacktestEngine:
             rolling_need = self.sma_period * 24 + 24
             if len(hourly_closes) < rolling_need:
                 return
-            day_ms = 86400000
-            d_mask = (daily_df["open_time"] + day_ms) <= current_ts
+            tf_ms = self._trend_tf_ms
+            d_mask = (daily_df["open_time"] + tf_ms) <= current_ts
             d_closed = daily_df[d_mask]
             if len(d_closed) < min_daily:
                 return
@@ -250,8 +253,8 @@ class BacktestEngine:
             if not (allow_long or allow_short):
                 return
         elif mode != "disabled":
-            day_ms = 86400000
-            d_mask = (daily_df["open_time"] + day_ms) <= current_ts
+            tf_ms = self._trend_tf_ms
+            d_mask = (daily_df["open_time"] + tf_ms) <= current_ts
             d_closed = daily_df[d_mask]
             if len(d_closed) < min_daily:
                 return
