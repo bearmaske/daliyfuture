@@ -125,7 +125,7 @@ def write_markdown_report(
 ) -> None:
     """生成 markdown 报告，包含相关性表、窗口对比表、Top 因子解读。"""
     score = corr["spearman_r"].abs() * (1 - corr["spearman_p"].fillna(1.0))
-    top = score.sort_values(ascending=False).head(5)
+    top = score.dropna().sort_values(ascending=False).head(5)
 
     lines = []
     lines.append("# 实盘 P&L vs BTC 指标相关性报告")
@@ -176,7 +176,8 @@ def plot_overview(pnl: pd.Series, features: pd.DataFrame, out_path: str) -> None
 
     ax1.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d"))
     ax1.set_title("Daily cumulative P&L vs BTC volatility regime")
-    fig.legend(loc="upper left", bbox_to_anchor=(0.1, 0.95))
+    ax1.legend(loc="upper left")
+    ax2.legend(loc="upper right")
     fig.tight_layout()
     fig.savefig(out_path, dpi=120)
     plt.close(fig)
