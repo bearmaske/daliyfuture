@@ -1,5 +1,8 @@
 """一次性增量拉取 BTCUSDT 1H K 线到 data/BTCUSDT_1h.csv。"""
-import os, sys
+import os
+import sys
+import time
+
 import pandas as pd
 from binance.client import Client
 
@@ -13,7 +16,6 @@ def main():
     existing = pd.read_csv(DATA_FILE)
     last_ms = int(existing["open_time"].max())
     start_ms = last_ms + 1
-    import time
     end_ms = int(time.time() * 1000)
     print(f"[fetch] from {pd.to_datetime(start_ms, unit='ms')} to {pd.to_datetime(end_ms, unit='ms')}")
     klines = fetch_klines_batched(client, "BTCUSDT", "1h", start_ms, end_ms)
