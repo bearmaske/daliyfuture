@@ -1,6 +1,9 @@
 """分析实盘账户每小时净 P&L 与 BTC 指标的相关性。"""
 from __future__ import annotations
 
+import argparse
+import os
+
 import numpy as np
 import pandas as pd
 from scipy import stats
@@ -181,3 +184,36 @@ def plot_overview(pnl: pd.Series, features: pd.DataFrame, out_path: str) -> None
     fig.tight_layout()
     fig.savefig(out_path, dpi=120)
     plt.close(fig)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--income", default="results/live_income_20260501_20260518.csv")
+    parser.add_argument("--btc", default="data/BTCUSDT_1h.csv")
+    parser.add_argument("--report", default="results/pnl_btc_correlation_report.md")
+    parser.add_argument("--chart", default="results/pnl_btc_chart.png")
+    args = parser.parse_args()
+
+    income = pd.read_csv(args.income)
+    klines = pd.read_csv(args.btc)
+
+    pnl = aggregate_hourly_pnl(income)
+    features = build_btc_indicators(klines)
+
+    features = features.reindex(pnl.index)
+
+    corr = compute_correlations(pnl, features)
+    cmp = compare_win_loss_windows(pnl, features)
+
+    os.makedirs(os.path.dirname(args.report), exist_ok=True)
+    write_markdown_report(corr, cmp, pnl, args.report)
+    plot_overview(pnl, features, args.chart)
+
+    print(f"[done] wrote {args.report} and {args.chart}")
+    print("\nTop 5 by |Spearman|*(1-p):")
+    score = corr["spearman_r"].abs() * (1 - corr["spearman_p"].fillna(1.0))
+    print(score.dropna().sort_values(ascending=False).head(5).to_string())
+
+
+if __name__ == "__main__":
+    main()
