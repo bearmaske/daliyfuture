@@ -4,6 +4,10 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 from scipy import stats
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 
 
 def aggregate_hourly_pnl(income_df: pd.DataFrame) -> pd.Series:
@@ -111,3 +115,68 @@ def compare_win_loss_windows(pnl: pd.Series, features: pd.DataFrame) -> pd.DataF
             "n_win": len(win_vals),
         })
     return pd.DataFrame(rows).set_index("feature")
+
+
+def write_markdown_report(
+    corr: pd.DataFrame,
+    cmp: pd.DataFrame,
+    pnl: pd.Series,
+    out_path: str,
+) -> None:
+    """生成 markdown 报告，包含相关性表、窗口对比表、Top 因子解读。"""
+    score = corr["spearman_r"].abs() * (1 - corr["spearman_p"].fillna(1.0))
+    top = score.sort_values(ascending=False).head(5)
+
+    lines = []
+    lines.append("# 实盘 P&L vs BTC 指标相关性报告")
+    lines.append("")
+    lines.append(f"- 时间范围：{pnl.index.min()} ~ {pnl.index.max()}")
+    lines.append(f"- 小时样本数：{len(pnl)}（盈利 {(pnl>0).sum()} / 亏损 {(pnl<0).sum()} / 平 {(pnl==0).sum()}）")
+    lines.append(f"- 总净 P&L：{pnl.sum():.2f} USDT")
+    lines.append("")
+    lines.append("## 1. 相关性（Pearson + Spearman）")
+    lines.append("")
+    lines.append(corr.round(4).to_markdown())
+    lines.append("")
+    lines.append("## 2. 盈利 vs 亏损小时的指标分布对比")
+    lines.append("")
+    lines.append(cmp.round(4).to_markdown())
+    lines.append("")
+    lines.append("## 3. Top 5 影响因子（按 |Spearman| × (1-p) 排序）")
+    lines.append("")
+    for feat, sc in top.items():
+        row = corr.loc[feat]
+        cmp_row = cmp.loc[feat]
+        direction = "亏损时偏高" if cmp_row["loss_mean"] > cmp_row["win_mean"] else "亏损时偏低"
+        lines.append(f"- **{feat}** (score={sc:.3f})")
+        lines.append(f"    - Spearman r={row['spearman_r']:.3f} (p={row['spearman_p']:.3g})")
+        lines.append(f"    - {direction}：loss_mean={cmp_row['loss_mean']:.4f} vs win_mean={cmp_row['win_mean']:.4f}, MWU p={cmp_row['mwu_p']:.3g}")
+        lines.append("")
+
+    with open(out_path, "w") as f:
+        f.write("\n".join(lines))
+
+
+def plot_overview(pnl: pd.Series, features: pd.DataFrame, out_path: str) -> None:
+    """日累计 P&L 与 BTC 波动率 / BB 带宽双轴叠加图。"""
+    daily_pnl = pnl.resample("1D").sum().cumsum()
+    daily_vol = features["ret_std_24h"].resample("1D").mean()
+    daily_bbw = features["bb_width"].resample("1D").mean()
+
+    fig, ax1 = plt.subplots(figsize=(12, 5))
+    ax1.plot(daily_pnl.index, daily_pnl.values, color="tab:blue", label="cum P&L (USDT)", linewidth=2)
+    ax1.set_ylabel("Cumulative P&L (USDT)", color="tab:blue")
+    ax1.axhline(0, color="grey", linewidth=0.5)
+    ax1.tick_params(axis="y", labelcolor="tab:blue")
+
+    ax2 = ax1.twinx()
+    ax2.plot(daily_vol.index, daily_vol.values, color="tab:orange", label="BTC 24H ret std", alpha=0.7)
+    ax2.plot(daily_bbw.index, daily_bbw.values, color="tab:green", label="BTC BB width", alpha=0.7)
+    ax2.set_ylabel("BTC volatility / BB width", color="tab:gray")
+
+    ax1.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d"))
+    ax1.set_title("Daily cumulative P&L vs BTC volatility regime")
+    fig.legend(loc="upper left", bbox_to_anchor=(0.1, 0.95))
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=120)
+    plt.close(fig)
