@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+from scipy import stats
 
 
 def aggregate_hourly_pnl(income_df: pd.DataFrame) -> pd.Series:
@@ -63,3 +64,50 @@ def build_btc_indicators(klines: pd.DataFrame) -> pd.DataFrame:
     out["hl_range"] = (high - low) / close
 
     return out
+
+
+def compute_correlations(pnl: pd.Series, features: pd.DataFrame) -> pd.DataFrame:
+    """对每个特征 vs pnl，返回 Pearson / Spearman 相关系数与 p 值。"""
+    common = features.index.intersection(pnl.index)
+    pnl_a = pnl.reindex(common)
+    rows = []
+    for col in features.columns:
+        x = features[col].reindex(common)
+        mask = x.notna() & pnl_a.notna()
+        if mask.sum() < 10:
+            rows.append({"feature": col, "pearson_r": np.nan, "pearson_p": np.nan,
+                         "spearman_r": np.nan, "spearman_p": np.nan, "n": int(mask.sum())})
+            continue
+        pr, pp = stats.pearsonr(x[mask], pnl_a[mask])
+        sr, sp = stats.spearmanr(x[mask], pnl_a[mask])
+        rows.append({"feature": col, "pearson_r": pr, "pearson_p": pp,
+                     "spearman_r": sr, "spearman_p": sp, "n": int(mask.sum())})
+    return pd.DataFrame(rows).set_index("feature")
+
+
+def compare_win_loss_windows(pnl: pd.Series, features: pd.DataFrame) -> pd.DataFrame:
+    """按 pnl>0 / pnl<0 分组，对每个特征比较分布（mean / median / Mann–Whitney U）。"""
+    common = features.index.intersection(pnl.index)
+    pnl_a = pnl.reindex(common)
+    win_mask = pnl_a > 0
+    loss_mask = pnl_a < 0
+    rows = []
+    for col in features.columns:
+        x = features[col].reindex(common)
+        win_vals = x[win_mask].dropna()
+        loss_vals = x[loss_mask].dropna()
+        if len(win_vals) < 5 or len(loss_vals) < 5:
+            mwu_p = np.nan
+        else:
+            mwu_p = stats.mannwhitneyu(loss_vals, win_vals, alternative="two-sided").pvalue
+        rows.append({
+            "feature": col,
+            "loss_mean": loss_vals.mean(),
+            "win_mean": win_vals.mean(),
+            "loss_median": loss_vals.median(),
+            "win_median": win_vals.median(),
+            "mwu_p": mwu_p,
+            "n_loss": len(loss_vals),
+            "n_win": len(win_vals),
+        })
+    return pd.DataFrame(rows).set_index("feature")

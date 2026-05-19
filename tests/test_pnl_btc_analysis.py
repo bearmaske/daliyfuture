@@ -3,7 +3,7 @@ import pandas as pd
 import pytest
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from scripts.analyze_pnl_vs_btc import aggregate_hourly_pnl, build_btc_indicators
+from scripts.analyze_pnl_vs_btc import aggregate_hourly_pnl, build_btc_indicators, compute_correlations, compare_win_loss_windows
 
 
 def test_aggregate_hourly_pnl_sums_all_income_types_per_hour():
@@ -66,3 +66,29 @@ def test_build_btc_indicators_no_nan_after_warmup():
     out = build_btc_indicators(klines)
     tail = out.iloc[60:]
     assert not tail.isna().any().any()
+
+
+def test_compute_correlations_returns_pearson_and_spearman_per_column():
+    idx = pd.date_range("2026-05-01", periods=100, freq="1h")
+    pnl = pd.Series(np.linspace(-10, 10, 100), index=idx)
+    feats = pd.DataFrame({
+        "perfectly_correlated": np.linspace(-10, 10, 100),
+        "noise": np.random.RandomState(0).randn(100),
+    }, index=idx)
+    out = compute_correlations(pnl, feats)
+    assert {"pearson_r", "pearson_p", "spearman_r", "spearman_p"}.issubset(out.columns)
+    assert out.loc["perfectly_correlated", "pearson_r"] == pytest.approx(1.0, abs=1e-9)
+    assert abs(out.loc["noise", "pearson_r"]) < 0.5
+
+
+def test_compare_win_loss_windows_reports_means_and_mwu_p():
+    idx = pd.date_range("2026-05-01", periods=100, freq="1h")
+    pnl = pd.Series([1.0] * 50 + [-1.0] * 50, index=idx)
+    feats = pd.DataFrame({
+        "feat_high_on_loss": [0.0] * 50 + [5.0] * 50,
+    }, index=idx)
+    out = compare_win_loss_windows(pnl, feats)
+    assert "loss_mean" in out.columns and "win_mean" in out.columns and "mwu_p" in out.columns
+    assert out.loc["feat_high_on_loss", "loss_mean"] == pytest.approx(5.0)
+    assert out.loc["feat_high_on_loss", "win_mean"] == pytest.approx(0.0)
+    assert out.loc["feat_high_on_loss", "mwu_p"] < 0.01
