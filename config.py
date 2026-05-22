@@ -59,6 +59,14 @@ class Config:
     # daily trend + 1H BB breakout + 24H high/low confirmation.
     H6_MIDDLE_FILTER_ENABLED: bool = True
 
+    # BNB fee burn — pay USDⓈ-M Futures fees in BNB for 10% discount.
+    # When True, bot syncs the Binance-side toggle to ON at startup. When False,
+    # bot does NOT touch the account setting (leaves whatever you set manually).
+    # NOTE: bot does NOT auto-buy/transfer BNB. You must keep BNB in the futures
+    # wallet manually, otherwise Binance falls back to USDT (no discount).
+    BNB_FEE_BURN_ENABLED: bool = False
+    BNB_BALANCE_MIN_ALERT: float = 0.05  # heartbeat warns when BNB futures balance below this
+
     # Scanning
     TOP_SYMBOLS_COUNT: int = 50
     STABLECOIN_FILTER: list = None

@@ -86,6 +86,9 @@ def main():
     except Exception as e:
         logger.warning("[同步] 同步失败，使用本地数据: %s", e)
 
+    if config.BNB_FEE_BURN_ENABLED:
+        _sync_bnb_fee_burn(exchange)
+
     logger.info("[状态] 余额: $%.2f | 当前持仓: %d | 运行时长: %s",
                 state_mgr.balance, state_mgr.position_count, get_runtime())
 
@@ -189,6 +192,43 @@ def main():
         scheduler.start()
     except (KeyboardInterrupt, SystemExit):
         pass
+
+
+def _sync_bnb_fee_burn(exchange: Exchange) -> None:
+    """Ensure Binance-side BNB fee-burn toggle is ON; warn if BNB balance is low."""
+    try:
+        status = exchange.get_fee_burn_status()
+    except Exception as e:
+        logger.warning("[BNB抵扣] 查询开关状态失败: %s", e)
+        return
+
+    if not status:
+        try:
+            exchange.set_fee_burn(True)
+            logger.info("[BNB抵扣] 已开启 BNB 抵扣手续费 (10%% 折扣)")
+            notify("BNB 抵扣已开启",
+                   "已通过 API 开启 USDⓈ-M Futures BNB 抵扣 (9 折)\n"
+                   "请确保合约钱包有足够 BNB，否则会回退到 USDT 扣费")
+        except Exception as e:
+            logger.error("[BNB抵扣] 开启失败: %s", e)
+            return
+    else:
+        logger.info("[BNB抵扣] 开关已为 ON (10%% 折扣生效中)")
+
+    try:
+        bnb_bal = exchange.get_bnb_futures_balance()
+    except Exception as e:
+        logger.warning("[BNB抵扣] 查询 BNB 余额失败: %s", e)
+        return
+
+    if bnb_bal < config.BNB_BALANCE_MIN_ALERT:
+        logger.warning("[BNB抵扣] 合约钱包 BNB 余额过低: %.6f (阈值 %.4f) - 可能回退 USDT 扣费",
+                       bnb_bal, config.BNB_BALANCE_MIN_ALERT)
+        notify("⚠ BNB 余额不足",
+               f"合约钱包 BNB 余额: {bnb_bal:.6f} (阈值 {config.BNB_BALANCE_MIN_ALERT})\n"
+               f"请尽快划转 BNB 到合约钱包，否则手续费会按 USDT 全额收取")
+    else:
+        logger.info("[BNB抵扣] 合约钱包 BNB 余额: %.6f", bnb_bal)
 
 
 def _check_daily_drawdown(total_assets: float, state_mgr: StateManager) -> bool:
@@ -332,6 +372,16 @@ def _heartbeat(exchange: Exchange, state_mgr: StateManager):
         lines.append(f"平台手续费(/income): ${platform_commission:.4f}")
     except Exception as e:
         logger.warning("[心跳] 获取平台手续费失败: %s", e)
+
+    # BNB fee burn status — only shown when configured ON
+    if config.BNB_FEE_BURN_ENABLED:
+        try:
+            bnb_bal = exchange.get_bnb_futures_balance()
+            burn_on = exchange.get_fee_burn_status()
+            warn_tag = " ⚠ 低于阈值" if bnb_bal < config.BNB_BALANCE_MIN_ALERT else ""
+            lines.append(f"BNB 抵扣: {'ON' if burn_on else 'OFF'} (9 折) | 合约 BNB 余额: {bnb_bal:.6f}{warn_tag}")
+        except Exception as e:
+            logger.warning("[心跳] BNB 抵扣状态查询失败: %s", e)
 
     if positions:
         lines.append("--- 当前持仓 ---")

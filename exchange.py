@@ -504,6 +504,33 @@ class Exchange:
                 return float(asset["availableBalance"])
         return 0.0
 
+    def get_bnb_futures_balance(self) -> float:
+        """BNB wallet balance in USDⓈ-M Futures account (for fee-burn monitoring)."""
+        account = self._retry(lambda: self.trading_client.futures_account())
+        for asset in account.get("assets", []):
+            if asset["asset"] == "BNB":
+                return float(asset.get("walletBalance", 0))
+        return 0.0
+
+    def get_fee_burn_status(self) -> bool:
+        """GET /fapi/v1/feeBurn — whether USDⓈ-M Futures uses BNB to pay fees (10% off)."""
+        resp = self._retry(
+            lambda: self.trading_client._request_futures_api(
+                "get", "feeBurn", signed=True, data={}
+            )
+        )
+        # Binance returns {"feeBurn": true} or {"feeBurn": false}
+        return bool(resp.get("feeBurn", False))
+
+    def set_fee_burn(self, enable: bool) -> dict:
+        """POST /fapi/v1/feeBurn — toggle BNB fee-burn on/off (account-wide)."""
+        return self._retry(
+            lambda: self.trading_client._request_futures_api(
+                "post", "feeBurn", signed=True,
+                data={"feeBurn": "true" if enable else "false"},
+            )
+        )
+
     def get_account_summary(self) -> dict:
         """Get account summary: total wallet balance, unrealized PnL, total assets."""
         account = self._retry(lambda: self.testnet_client.futures_account())

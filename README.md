@@ -88,6 +88,13 @@
 - 心跳同时查询 `GET /fapi/v1/income?incomeType=COMMISSION`，对比两个来源
 - 自动处理 USDT 和 BNB 抵扣两种手续费类型
 
+#### BNB 抵扣（9 折）
+
+- 开关 `BNB_FEE_BURN_ENABLED`（默认关闭）。开启后启动时调 `POST /fapi/v1/feeBurn` 同步 Binance 侧开关为 ON，所有 USDⓈ-M 永续合约的手续费打 9 折
+- 启动 + 每次心跳检查合约钱包的 BNB 余额，低于 `BNB_BALANCE_MIN_ALERT`（默认 0.05 BNB）时发警告通知
+- **Bot 不会自动买/划转 BNB**——你需要手动把 BNB 划到 USDⓈ-M Futures 钱包；BNB 不足时 Binance 自动回退到 USDT 扣费（当笔不享受折扣）
+- 关闭开关时 bot 不会主动改 Binance 侧设置（保留你手动设的状态）
+
 ---
 
 ## 快速开始
@@ -235,6 +242,8 @@ daliyfuture/
 | `BB_PERIOD` | 20 | 布林带周期 |
 | `BB_STD` | 2.0 | 布林带标准差倍数 |
 | `H6_MIDDLE_FILTER_ENABLED` | True | 6H 布林中轨同侧过滤开关（叠加在日线趋势 + 1H 突破 + 24H 极值之上） |
+| `BNB_FEE_BURN_ENABLED` | False | 开启 BNB 抵扣手续费（9 折）；启动时同步 Binance 侧 `feeBurn` 开关为 ON |
+| `BNB_BALANCE_MIN_ALERT` | 0.05 | 合约钱包 BNB 余额低于此值时通知告警（仅在 `BNB_FEE_BURN_ENABLED=True` 时生效） |
 
 ### 选币
 
