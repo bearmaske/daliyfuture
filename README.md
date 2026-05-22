@@ -14,9 +14,10 @@
    - 日线收盘价 > 日线布林中轨 → 只做多
    - 日线收盘价 < 日线布林中轨 → 只做空
 
-3. **1H 布林带突破 + 24H 极值确认**（双条件同时满足）：
-   - 做多：1H 收盘价突破 1H 布林上轨，**且**该 1H 最高价是过去 24 根 1H 的最高价
-   - 做空：1H 收盘价跌破 1H 布林下轨，**且**该 1H 最低价是过去 24 根 1H 的最低价
+3. **1H 布林带突破 + 24H 极值确认 + 6H 中轨同侧**（三条件同时满足）：
+   - 做多：1H 收盘价突破 1H 布林上轨，**且**该 1H 最高价是过去 24 根 1H 的最高价，**且** 1H 收盘价位于 6H 布林中轨上方
+   - 做空：1H 收盘价跌破 1H 布林下轨，**且**该 1H 最低价是过去 24 根 1H 的最低价，**且** 1H 收盘价位于 6H 布林中轨下方
+   - 6H 中轨过滤由 `H6_MIDDLE_FILTER_ENABLED` 开关控制（默认开启）
    - 信号在 1H 收盘确认，下一根 1M 开盘价（市价单）入场
 
 4. **交易量优先**：多信号并发时，按 24h 成交量从大到小排序开仓，优先流动性好的币种。
@@ -29,7 +30,7 @@
 |------|------|------|
 | 固定止损 | `FIXED_STOP_LOSS_PCT = 2%` | 开仓后立即在 Binance 挂 `STOP_MARKET` 订单，由交易所直接执行 |
 | 激活式移动止盈 | `TRAILING_ACTIVATION_PCT = 3%` | 浮盈达到 3% 后激活，本地轮询触发 |
-| 移动止盈回撤 | `TRAILING_DRAWDOWN_PCT = 1%` | 激活后，从最有利价格回撤 1% 出场 |
+| 移动止盈回撤 | `TRAILING_DRAWDOWN_PCT = 1.5%` | 激活后，从最有利价格回撤 1.5% 出场 |
 
 **固定止损**：开仓后立即通过 `POST /fapi/v1/algoOrder`（`algoType=CONDITIONAL`）在 Binance 挂 `STOP_MARKET` 条件单（止损价 = 入场价 ± 2%）。止损由交易所直接执行，不依赖 bot 在线。每 60 秒查询订单状态：
 - `FILLED` → 本地记录平仓，撤销移动止盈单（OCO）
@@ -38,8 +39,8 @@
 
 **移动止盈**：两层机制配合，消除轮询盲区：
 
-1. **WebSocket 实时激活**（`watcher.py`）：后台订阅 `<symbol>@markPrice` 流，每秒收到标记价格。浮盈达到 3% 时立刻以**当时最高价**为激活价，通过 `POST /fapi/v1/algoOrder` 挂 `TRAILING_STOP_MARKET`（回调率 1%，`workingType=MARK_PRICE`）。挂单成功后自动取消订阅。
-2. **交易所实时追踪**：`TRAILING_STOP_MARKET` 挂上后，交易所实时跟踪最高/最低价，回撤 1% 自动触发，不依赖 bot 轮询。
+1. **WebSocket 实时激活**（`watcher.py`）：后台订阅 `<symbol>@markPrice` 流，每秒收到标记价格。浮盈达到 3% 时立刻以**当时最高价**为激活价，通过 `POST /fapi/v1/algoOrder` 挂 `TRAILING_STOP_MARKET`（回调率 1.5%，`workingType=MARK_PRICE`）。挂单成功后自动取消订阅。
+2. **交易所实时追踪**：`TRAILING_STOP_MARKET` 挂上后，交易所实时跟踪最高/最低价，回撤 1.5% 自动触发，不依赖 bot 轮询。
 3. **轮询兜底**（每 60 秒）：查询移动止盈单状态，`FILLED` 撤销固定止损单并记录平仓；`CANCELED/EXPIRED` 用当前极值价重新挂单；WebSocket 挂单失败时本地逻辑托底。
 
 两个交易所订单形成手动 OCO：任意一个触发，自动撤销另一个。
@@ -212,7 +213,7 @@ daliyfuture/
 |------|--------|------|
 | `FIXED_STOP_LOSS_PCT` | 0.02 | 固定止损 2% |
 | `TRAILING_ACTIVATION_PCT` | 0.03 | 移动止盈激活阈值（浮盈≥3%） |
-| `TRAILING_DRAWDOWN_PCT` | 0.01 | 移动止盈激活后回撤触发线（1%） |
+| `TRAILING_DRAWDOWN_PCT` | 0.015 | 移动止盈激活后回撤触发线（1.5%） |
 
 ### 全局风控
 
@@ -233,6 +234,7 @@ daliyfuture/
 | `SMA_PERIOD` | 20 | 日线趋势 SMA 周期 |
 | `BB_PERIOD` | 20 | 布林带周期 |
 | `BB_STD` | 2.0 | 布林带标准差倍数 |
+| `H6_MIDDLE_FILTER_ENABLED` | True | 6H 布林中轨同侧过滤开关（叠加在日线趋势 + 1H 突破 + 24H 极值之上） |
 
 ### 选币
 

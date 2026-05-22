@@ -31,7 +31,7 @@ class Config:
 
     # Trailing TP + Fixed SL
     TRAILING_ACTIVATION_PCT: float = 0.03   # activate trailing when profit >= 3%
-    TRAILING_DRAWDOWN_PCT: float = 0.01     # exit when price retraces 1% from extreme
+    TRAILING_DRAWDOWN_PCT: float = 0.015    # exit when price retraces 1.5% from extreme
     FIXED_STOP_LOSS_PCT: float = 0.02       # fixed stop loss 2% from entry
 
     # Global Drawdown Circuit Breaker
@@ -53,6 +53,11 @@ class Config:
     # Bollinger Bands
     BB_PERIOD: int = 20
     BB_STD: float = 2.0
+
+    # 6H BB middle filter: require current 1H close on the trend-corresponding
+    # side of the 6H BB middle (LONG above, SHORT below). Layered on top of
+    # daily trend + 1H BB breakout + 24H high/low confirmation.
+    H6_MIDDLE_FILTER_ENABLED: bool = True
 
     # Scanning
     TOP_SYMBOLS_COUNT: int = 50

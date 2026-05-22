@@ -177,7 +177,9 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
         "日线数据不足": 0,
         "无明确趋势": 0,
         "小时线数据不足": 0,
+        "6H数据不足": 0,
         "24H高低不满足": 0,
+        "6H中轨不满足": 0,
         "无突破": 0,
         "异常": 0,
     }
@@ -288,6 +290,19 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
             current_close = hourly_closes[-1]
             current_price = exchange.get_price(symbol)
 
+            # 6H BB middle filter — require close on the corresponding side
+            h6_middle = 0.0
+            if config.H6_MIDDLE_FILTER_ENABLED:
+                h6_klines = exchange.get_klines(
+                    symbol, Client.KLINE_INTERVAL_6HOUR, config.BB_PERIOD + 1
+                )
+                h6_closes = [float(k[4]) for k in h6_klines[:-1]]  # drop unclosed
+                if len(h6_closes) < config.BB_PERIOD:
+                    logger.info("[跳过] %s | 原因: 6H数据不足 (%d/%d)", symbol, len(h6_closes), config.BB_PERIOD)
+                    skip_counts["6H数据不足"] += 1
+                    continue
+                _, h6_middle, _ = calculate_bollinger_bands(h6_closes, config.BB_PERIOD, config.BB_STD)
+
             # 24-bar high/low breakout confirmation
             # hourly_klines[-1] = unclosed, [-2] = signal bar, [-26:-2] = 24 prior bars
             signal_bar = hourly_klines[-2]
@@ -302,18 +317,24 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
             else:
                 is_24h_high = is_24h_low = False
 
+            if config.H6_MIDDLE_FILTER_ENABLED:
+                h6_side_ok_long = current_close > h6_middle
+                h6_side_ok_short = current_close < h6_middle
+            else:
+                h6_side_ok_long = h6_side_ok_short = True
+
             if mode != "disabled":
-                if trend == "LONG" and current_close > h_upper and is_24h_high:
+                if trend == "LONG" and current_close > h_upper and is_24h_high and h6_side_ok_long:
                     signal = True
-                elif trend == "SHORT" and current_close < h_lower and is_24h_low:
+                elif trend == "SHORT" and current_close < h_lower and is_24h_low and h6_side_ok_short:
                     signal = True
                 else:
                     signal = False
             else:
-                if current_close > h_upper and is_24h_high:
+                if current_close > h_upper and is_24h_high and h6_side_ok_long:
                     signal = True
                     trend = "LONG"
-                elif current_close < h_lower and is_24h_low:
+                elif current_close < h_lower and is_24h_low and h6_side_ok_short:
                     signal = True
                     trend = "SHORT"
                 else:
@@ -323,11 +344,12 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
             bb_width_pct = (h_upper - h_lower) / h_middle * 100 if h_middle else 0
             close_to_upper_pct = (current_close - h_middle) / (h_upper - h_middle) * 100 if h_upper > h_middle else 0
             signal_tag = ">>> 信号 <<<" if signal else "-"
+            h6_middle_str = f"{h6_middle:.4f}" if config.H6_MIDDLE_FILTER_ENABLED else "-"
             logger.info(
-                "[扫描] %s | 趋势: %s | 现价: %.4f | 日线中轨: %.4f | "
+                "[扫描] %s | 趋势: %s | 现价: %.4f | 日线中轨: %.4f | 6H中轨: %s | "
                 "1H收盘: %.4f | BB上/中/下: %.4f/%.4f/%.4f | 带宽 %.2f%% | 位置 %+.0f%% | "
                 "24H高: %.4f(%s) | 24H低: %.4f(%s) | 24h量: $%.1fM | %s",
-                symbol, trend or "-", current_price, d_middle,
+                symbol, trend or "-", current_price, d_middle, h6_middle_str,
                 current_close, h_upper, h_middle, h_lower,
                 bb_width_pct, close_to_upper_pct,
                 signal_high, "✓" if is_24h_high else "✗",
@@ -337,9 +359,17 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
             )
 
             if not signal:
-                # Distinguish BB break without 24H confirmation vs no BB break
-                if (trend == "LONG" and current_close > h_upper) or (trend == "SHORT" and current_close < h_lower):
-                    skip_counts["24H高低不满足"] += 1
+                # Classify miss: BB breakout reached but 24H or 6H-middle filter failed,
+                # vs no BB breakout at all.
+                broke_long = trend == "LONG" and current_close > h_upper
+                broke_short = trend == "SHORT" and current_close < h_lower
+                if broke_long or broke_short:
+                    confirms_24h = (broke_long and is_24h_high) or (broke_short and is_24h_low)
+                    confirms_h6 = (broke_long and h6_side_ok_long) or (broke_short and h6_side_ok_short)
+                    if confirms_24h and not confirms_h6:
+                        skip_counts["6H中轨不满足"] += 1
+                    else:
+                        skip_counts["24H高低不满足"] += 1
                 else:
                     skip_counts["无突破"] += 1
                 continue
