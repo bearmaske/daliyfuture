@@ -1,11 +1,70 @@
-import numpy as np
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 from typing import List, Optional, Tuple
+
+import numpy as np
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
+
 from config import config
 from exchange import Exchange
 from state import StateManager
 from notifier import notify, logger
+
+
+def _wait_for_fresh_1h_bar(exchange: Exchange, attempts: int = 3, sleep_s: float = 2.0) -> bool:
+    """Probe BTCUSDT 1H klines until the most-recently-closed bar matches the
+    current scan hour. Returns True if a fresh bar is confirmed, False otherwise
+    (in which case the caller should warn and continue with potentially stale data).
+
+    Binance USDT-M 1H bars close at top-of-hour UTC. The just-closed bar's
+    close_time = top_of_hour_ms - 1.
+    """
+    now_utc = datetime.now(timezone.utc)
+    top_of_hour_ms = int(now_utc.replace(minute=0, second=0, microsecond=0).timestamp() * 1000)
+    expected_close_ms = top_of_hour_ms - 1
+    for attempt in range(1, attempts + 1):
+        try:
+            gate = exchange.get_klines("BTCUSDT", "1h", 2)
+            if gate and len(gate) >= 2 and int(gate[-2][6]) >= expected_close_ms:
+                if attempt > 1:
+                    logger.info("[闸门] 第 %d 次探测确认 1H bar 已更新", attempt)
+                return True
+            logger.info("[闸门] 第 %d 次探测: 最新已收盘 bar 时间戳 %s 落后,%.0fs 后重试",
+                        attempt, int(gate[-2][6]) if gate and len(gate) >= 2 else "?", sleep_s)
+        except Exception as e:
+            logger.warning("[闸门] 第 %d 次探测异常: %s", attempt, e)
+        if attempt < attempts:
+            time.sleep(sleep_s)
+    return False
+
+
+def _fetch_symbol_data(
+    exchange: Exchange,
+    symbol: str,
+    hourly_limit: int,
+    daily_limit: int,
+    needs_daily: bool,
+    needs_h6: bool,
+) -> dict:
+    """Pull all klines + price for one symbol. Thread-safe (read-only HTTP).
+    Returns {symbol, hourly, daily|None, h6|None, price} or {symbol, error}."""
+    try:
+        out = {"symbol": symbol}
+        out["hourly"] = exchange.get_klines(symbol, Client.KLINE_INTERVAL_1HOUR, hourly_limit)
+        out["daily"] = (
+            exchange.get_klines(symbol, Client.KLINE_INTERVAL_1DAY, daily_limit)
+            if needs_daily else None
+        )
+        out["h6"] = (
+            exchange.get_klines(symbol, Client.KLINE_INTERVAL_6HOUR, config.BB_PERIOD + 1)
+            if needs_h6 else None
+        )
+        out["price"] = exchange.get_price(symbol)
+        return out
+    except Exception as e:
+        return {"symbol": symbol, "error": str(e)}
 
 # Error codes that mean "Binance itself is refusing to take a new long/short
 # position for this symbol right now" — treat as a strong market signal and
@@ -163,6 +222,9 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
         logger.info(f"Insufficient balance: {state_mgr.balance:.2f}")
         return
 
+    if not _wait_for_fresh_1h_bar(exchange):
+        logger.warning("[闸门] 3 次探测仍未看到本小时新 bar,继续扫描可能用旧数据")
+
     top_symbols = exchange.get_top_symbols()
     volume_map = exchange.get_volume_map(top_symbols)
     logger.info("=" * 60)
@@ -194,9 +256,8 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
         hourly_bars_needed = max(hourly_bars_needed, rolling_hours_needed)
     hourly_kline_limit = hourly_bars_needed + 1  # +1 to discard unclosed candle
 
-    # Phase 1: scan all symbols and collect signals
-    signals = []
-
+    # Phase 1a: cheap local filters (no HTTP) → decide which symbols to fetch
+    scannable = []
     for symbol in top_symbols:
         if state_mgr.get_position_by_symbol(symbol):
             logger.info("[跳过] %s | 原因: 已持仓", symbol)
@@ -224,15 +285,46 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
             skip_counts["币种冷却"] += 1
             continue
 
+        scannable.append(symbol)
+
+    # Phase 1b: concurrent prefetch (klines + price) for scannable symbols only.
+    # All endpoints are read-only and well under the 2400 weight/min IP limit
+    # (50 symbols × 4 calls × weight-1 = 200 weight per scan ≈ 8% of cap).
+    mode = config.TREND_FILTER_MODE
+    needs_daily = mode in ("sma", "bb_middle")
+    needs_h6 = config.H6_MIDDLE_FILTER_ENABLED
+    prefetched: dict[str, dict] = {}
+    if scannable:
+        t0 = time.time()
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futs = {
+                pool.submit(
+                    _fetch_symbol_data, exchange, s,
+                    hourly_kline_limit, daily_kline_limit, needs_daily, needs_h6,
+                ): s for s in scannable
+            }
+            for fut in as_completed(futs):
+                d = fut.result()
+                prefetched[d["symbol"]] = d
+        logger.info("[策略] 并发预取完成 | %d 个 symbol | 耗时 %.2fs",
+                    len(prefetched), time.time() - t0)
+
+    # Phase 1c: signal evaluation on main thread (pure numpy, microseconds/symbol)
+    signals = []
+
+    for symbol in scannable:
+        data = prefetched.get(symbol)
+        if data is None or "error" in data:
+            err = data.get("error") if data else "no data"
+            logger.error("[策略] %s 预取失败: %s", symbol, err)
+            skip_counts["异常"] += 1
+            continue
+
         try:
             trend = None
             d_middle = 0.0
-            mode = config.TREND_FILTER_MODE
 
-            # Fetch hourly bars first — rolling_sma mode needs ~506 of them
-            hourly_klines = exchange.get_klines(
-                symbol, Client.KLINE_INTERVAL_1HOUR, hourly_kline_limit
-            )
+            hourly_klines = data["hourly"]
             hourly_closes = [float(k[4]) for k in hourly_klines[:-1]]  # drop unclosed candle
             if len(hourly_closes) < config.BB_PERIOD + 1:
                 logger.info("[跳过] %s | 原因: 小时线数据不足 (%d/%d)", symbol, len(hourly_closes), config.BB_PERIOD + 1)
@@ -264,9 +356,7 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
                         continue
                     d_middle = float(np.mean(hourly_closes[-config.SMA_PERIOD * 24:]))
                 else:
-                    daily_klines = exchange.get_klines(
-                        symbol, Client.KLINE_INTERVAL_1DAY, daily_kline_limit
-                    )
+                    daily_klines = data["daily"]
                     daily_closes = [float(k[4]) for k in daily_klines[:-1]]  # drop unclosed
                     if len(daily_closes) < config.SMA_PERIOD + 1:
                         logger.info("[跳过] %s | 原因: 日线数据不足 (%d/%d)", symbol, len(daily_closes), config.SMA_PERIOD + 1)
@@ -288,14 +378,12 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
 
             h_upper, h_middle, h_lower = calculate_bollinger_bands(hourly_closes, config.BB_PERIOD, config.BB_STD)
             current_close = hourly_closes[-1]
-            current_price = exchange.get_price(symbol)
+            current_price = data["price"]
 
             # 6H BB middle filter — require close on the corresponding side
             h6_middle = 0.0
             if config.H6_MIDDLE_FILTER_ENABLED:
-                h6_klines = exchange.get_klines(
-                    symbol, Client.KLINE_INTERVAL_6HOUR, config.BB_PERIOD + 1
-                )
+                h6_klines = data["h6"]
                 h6_closes = [float(k[4]) for k in h6_klines[:-1]]  # drop unclosed
                 if len(h6_closes) < config.BB_PERIOD:
                     logger.info("[跳过] %s | 原因: 6H数据不足 (%d/%d)", symbol, len(h6_closes), config.BB_PERIOD)
