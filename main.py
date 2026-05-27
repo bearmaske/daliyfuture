@@ -117,7 +117,7 @@ def main():
         strategy_job,
         "cron",
         minute=0,
-        second=5,
+        second=2,
         id="strategy",
         max_instances=1,
         misfire_grace_time=60,
@@ -165,17 +165,17 @@ def main():
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
 
-    # Calculate next strategy scan time (next hh:00:05)
+    # Calculate next strategy scan time (next hh:00:02)
     from datetime import timedelta as _td
     now = datetime.now(TZ_CN)
-    candidate = now.replace(minute=0, second=5, microsecond=0)
+    candidate = now.replace(minute=0, second=2, microsecond=0)
     if candidate <= now:
-        candidate = (now + _td(hours=1)).replace(minute=0, second=5, microsecond=0)
+        candidate = (now + _td(hours=1)).replace(minute=0, second=2, microsecond=0)
     next_scan = candidate
     wait_minutes = int((next_scan - now).total_seconds() / 60)
     wait_seconds = int((next_scan - now).total_seconds() % 60)
 
-    logger.info("[调度] 策略检查: 每小时 :00:05 (闸门校验 1H bar) | 止损监控: 每 %d 秒 | 心跳: 每 %d 小时 | 调仓: 每日 00:00",
+    logger.info("[调度] 策略检查: 每小时 :00:02 (闸门校验 1H bar, 1s×5 重试) | 止损监控: 每 %d 秒 | 心跳: 每 %d 小时 | 调仓: 每日 00:00",
                 config.RISK_CHECK_INTERVAL_SECONDS, config.HEARTBEAT_INTERVAL_HOURS)
     logger.info("[调度] 首次策略扫描: %s (约 %d 分 %d 秒后)",
                 next_scan.strftime("%H:%M:%S"), wait_minutes, wait_seconds)

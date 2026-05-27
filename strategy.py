@@ -13,7 +13,7 @@ from state import StateManager
 from notifier import notify, logger
 
 
-def _wait_for_fresh_1h_bar(exchange: Exchange, attempts: int = 3, sleep_s: float = 2.0) -> bool:
+def _wait_for_fresh_1h_bar(exchange: Exchange, attempts: int = 5, sleep_s: float = 1.0) -> bool:
     """Probe BTCUSDT 1H klines until the most-recently-closed bar matches the
     current scan hour. Returns True if a fresh bar is confirmed, False otherwise
     (in which case the caller should warn and continue with potentially stale data).
@@ -287,39 +287,25 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
 
         scannable.append(symbol)
 
-    # Phase 1b: concurrent prefetch (klines + price) for scannable symbols only.
-    # All endpoints are read-only and well under the 2400 weight/min IP limit
-    # (50 symbols × 4 calls × weight-1 = 200 weight per scan ≈ 8% of cap).
+    # Phase 1b+2 (fused): as each symbol's data comes back, evaluate the signal
+    # and immediately open. Saves the cost of waiting for the slowest fetch
+    # before any order goes in. Trade-off: when (signals > available_slots),
+    # winners are determined by data-arrival order, not 24h volume.
     mode = config.TREND_FILTER_MODE
     needs_daily = mode in ("sma", "bb_middle")
     needs_h6 = config.H6_MIDDLE_FILTER_ENABLED
-    prefetched: dict[str, dict] = {}
-    if scannable:
-        t0 = time.time()
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            futs = {
-                pool.submit(
-                    _fetch_symbol_data, exchange, s,
-                    hourly_kline_limit, daily_kline_limit, needs_daily, needs_h6,
-                ): s for s in scannable
-            }
-            for fut in as_completed(futs):
-                d = fut.result()
-                prefetched[d["symbol"]] = d
-        logger.info("[策略] 并发预取完成 | %d 个 symbol | 耗时 %.2fs",
-                    len(prefetched), time.time() - t0)
+    available_slots = config.MAX_POSITIONS - state_mgr.position_count
+    opened = 0
+    signals_count = 0
+    slots_exhausted_logged = False
 
-    # Phase 1c: signal evaluation on main thread (pure numpy, microseconds/symbol)
-    signals = []
-
-    for symbol in scannable:
-        data = prefetched.get(symbol)
-        if data is None or "error" in data:
-            err = data.get("error") if data else "no data"
-            logger.error("[策略] %s 预取失败: %s", symbol, err)
+    def _eval_and_maybe_open(data: dict) -> None:
+        nonlocal opened, signals_count, slots_exhausted_logged
+        symbol = data["symbol"]
+        if "error" in data:
+            logger.error("[策略] %s 预取失败: %s", symbol, data["error"])
             skip_counts["异常"] += 1
-            continue
-
+            return
         try:
             trend = None
             d_middle = 0.0
@@ -329,7 +315,7 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
             if len(hourly_closes) < config.BB_PERIOD + 1:
                 logger.info("[跳过] %s | 原因: 小时线数据不足 (%d/%d)", symbol, len(hourly_closes), config.BB_PERIOD + 1)
                 skip_counts["小时线数据不足"] += 1
-                continue
+                return
 
             if mode != "disabled":
                 if mode == "rolling_sma":
@@ -337,7 +323,7 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
                         logger.info("[跳过] %s | 原因: 小时线数据不足(滚动SMA需 %d/%d)",
                                     symbol, len(hourly_closes), rolling_hours_needed)
                         skip_counts["小时线数据不足"] += 1
-                        continue
+                        return
                     trend = check_trend_rolling(
                         hourly_closes, period_hours=config.SMA_PERIOD * 24, step_hours=24
                     )
@@ -353,7 +339,7 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
                         logger.info("[跳过] %s | 原因: 无明确趋势(滚动SMA斜率%s, 价格%sSMA)",
                                     symbol, slope, rel)
                         skip_counts["无明确趋势"] += 1
-                        continue
+                        return
                     d_middle = float(np.mean(hourly_closes[-config.SMA_PERIOD * 24:]))
                 else:
                     daily_klines = data["daily"]
@@ -361,7 +347,7 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
                     if len(daily_closes) < config.SMA_PERIOD + 1:
                         logger.info("[跳过] %s | 原因: 日线数据不足 (%d/%d)", symbol, len(daily_closes), config.SMA_PERIOD + 1)
                         skip_counts["日线数据不足"] += 1
-                        continue
+                        return
                     if mode == "sma":
                         trend = check_trend(daily_closes, config.SMA_PERIOD)
                     elif mode == "bb_middle":
@@ -373,7 +359,7 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
                         rel = "↑" if daily_closes[-1] > sma_now else "↓"
                         logger.info("[跳过] %s | 原因: 无明确趋势 (SMA斜率%s, 价格%sSMA)", symbol, slope, rel)
                         skip_counts["无明确趋势"] += 1
-                        continue
+                        return
                     _, d_middle, _ = calculate_bollinger_bands(daily_closes, config.SMA_PERIOD, config.BB_STD)
 
             h_upper, h_middle, h_lower = calculate_bollinger_bands(hourly_closes, config.BB_PERIOD, config.BB_STD)
@@ -388,7 +374,7 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
                 if len(h6_closes) < config.BB_PERIOD:
                     logger.info("[跳过] %s | 原因: 6H数据不足 (%d/%d)", symbol, len(h6_closes), config.BB_PERIOD)
                     skip_counts["6H数据不足"] += 1
-                    continue
+                    return
                 _, h6_middle, _ = calculate_bollinger_bands(h6_closes, config.BB_PERIOD, config.BB_STD)
 
             # 24-bar high/low breakout confirmation
@@ -460,44 +446,45 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
                         skip_counts["24H高低不满足"] += 1
                 else:
                     skip_counts["无突破"] += 1
-                continue
+                return
 
-            signals.append({
-                "symbol": symbol,
-                "trend": trend,
-                "price": current_price,
-                "volume": vol,
-            })
+            signals_count += 1
+            if opened >= available_slots:
+                if not slots_exhausted_logged:
+                    logger.info("[策略] 仓位已满,信号 %s 暂不开仓 (后续信号同样跳过)", symbol)
+                    slots_exhausted_logged = True
+                return
+            if state_mgr.balance < config.POSITION_SIZE:
+                logger.info("[策略] 余额不足 $%.2f < $%.2f,信号 %s 不开仓",
+                            state_mgr.balance, config.POSITION_SIZE, symbol)
+                return
+
+            _open_position(exchange, state_mgr, symbol, trend, current_price)
+            opened += 1
 
         except Exception as e:
             logger.error("[策略] %s 处理异常: %s", symbol, e)
             skip_counts["异常"] += 1
-            continue
 
-    # Phase 2: sort signals by 24h quote volume descending, then open
-    signals.sort(key=lambda s: s["volume"], reverse=True)
-    available_slots = config.MAX_POSITIONS - state_mgr.position_count
-
-    if signals:
-        logger.info("[策略] 收集到 %d 个信号，可用仓位 %d，按交易量排序开仓",
-                    len(signals), available_slots)
-
-    opened = 0
-    for sig in signals:
-        if opened >= available_slots:
-            logger.info("[策略] 已用完可用仓位，剩余 %d 个信号未开仓", len(signals) - opened)
-            break
-        if state_mgr.balance < config.POSITION_SIZE:
-            logger.info("[策略] 余额不足 $%.2f < $%.2f，停止开仓", state_mgr.balance, config.POSITION_SIZE)
-            break
-        _open_position(exchange, state_mgr, sig["symbol"], sig["trend"], sig["price"])
-        opened += 1
+    if scannable:
+        t0 = time.time()
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futs = {
+                pool.submit(
+                    _fetch_symbol_data, exchange, s,
+                    hourly_kline_limit, daily_kline_limit, needs_daily, needs_h6,
+                ): s for s in scannable
+            }
+            for fut in as_completed(futs):
+                _eval_and_maybe_open(fut.result())
+        logger.info("[策略] 扫描+下单完成 | %d 个 symbol | 耗时 %.2fs",
+                    len(scannable), time.time() - t0)
 
     skip_summary = " | ".join(f"{k} {v}" for k, v in skip_counts.items() if v > 0)
     if skip_summary:
         logger.info("[策略] 跳过汇总: %s", skip_summary)
     logger.info("[策略] 扫描完成 | 信号数: %d | 开仓: %d | 持仓: %d/%d | 余额: $%.2f",
-                len(signals), opened, state_mgr.position_count, config.MAX_POSITIONS, state_mgr.balance)
+                signals_count, opened, state_mgr.position_count, config.MAX_POSITIONS, state_mgr.balance)
     logger.info("=" * 60)
 
 
