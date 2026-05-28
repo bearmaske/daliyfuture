@@ -71,7 +71,7 @@ def notify(title: str, message: str):
     if config.is_live:
         _send_bark(prefixed_title, message)
     else:
-        _send_pushdeer(prefixed_title, message)
+        _send_pushdeer(title, message)
         _send_telegram(prefixed_title, message)
 
 
