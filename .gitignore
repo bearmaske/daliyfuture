@@ -10,3 +10,11 @@ __pycache__/
 # Backtesting data and results
 data/
 results/
+
+# Secrets backups (never commit — .env.example stays tracked)
+env.bak
+*.bak
+
+# OS / editor / tooling junk
+.DS_Store
+.codegraph/
