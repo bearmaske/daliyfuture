@@ -80,6 +80,15 @@ class Config:
     EXCLUDE_TOP10_SYMBOLS: list = None
     # Minimum 24h quote volume (USDT). Protects against thin-liquidity coins.
     MIN_QUOTE_VOLUME_24H: float = 50_000_000.0
+    # Sustained-liquidity filter: the 24h floor above is a *point-in-time* gate —
+    # a thin coin that pumps for one day spikes over it, gets traded, then reverts
+    # to thin (实盘验证:这类细币尾巴净亏 −$1,212). This requires the symbol's
+    # MEDIAN daily quote volume over the last N closed days to clear a floor too.
+    # Mode: "off" = disabled | "observe" = log what it WOULD drop, don't drop |
+    #       "enforce" = actually drop. Default "observe" for a safe forward look.
+    SUSTAINED_VOLUME_FILTER_MODE: str = "observe"
+    SUSTAINED_VOLUME_LOOKBACK_DAYS: int = 7
+    MIN_SUSTAINED_QUOTE_VOLUME: float = 50_000_000.0
     # Additional "spike pool": include coins whose most recent closed 1H quote
     # volume is >= MIN_1H_QUOTE_VOLUME, even if they miss the 24h top-N list.
     # Designed to catch 爆涨暴跌 that hasn't shown up in the 24h average yet.

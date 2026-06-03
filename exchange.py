@@ -1,11 +1,32 @@
 import math
 import time
+import statistics
 import concurrent.futures as _cf
 from typing import Optional, List
 from urllib.parse import urlencode
 from binance.client import Client
 from notifier import logger
 from config import config
+
+
+def sustained_quote_volume(klines: list, lookback: int) -> float:
+    """最近 `lookback` 个 *收盘* 日的日 quote 成交额中位数。
+
+    用中位数(不是均值)是关键诉求:某个币平时细量、偶尔暴量一天会骗过点时刻
+    的 24h 量门槛被买进来。median 对这种单日尖峰稳健 —— 一个平时 1M、某天 100M
+    的细币,median 仍是 ~1M,会被正确判为细币。
+    丢掉最后一根未收盘日线(项目惯例,避免拿不完整数据做决策)。
+    数据不足 lookback 天时,用现有收盘日计算;无收盘日返回 0.0。
+    klines 为 futures 1d K 线,quote volume 在索引 7。"""
+    if not klines:
+        return 0.0
+    closed = klines[:-1]  # 丢掉最后一根未收盘日线
+    if not closed:
+        return 0.0
+    vols = [float(k[7]) for k in closed[-lookback:]]
+    if not vols:
+        return 0.0
+    return statistics.median(vols)
 
 
 # python-binance 1.0.19 signs the raw Python string `a=v1&b=v2`, but `requests`
@@ -112,7 +133,7 @@ class Exchange:
                         len(pool_a_syms), min_vol / 1e6, top_vol, last_vol, below_floor)
 
         if not config.ENABLE_1H_SPIKE_POOL:
-            return pool_a_syms
+            return self._apply_sustained_filter(pool_a_syms)
 
         # Pool B: 1H spike. Fetch last-closed 1H volume for every eligible symbol.
         t_start = time.time()
@@ -128,7 +149,49 @@ class Exchange:
         if extras:
             detail = ", ".join(f"{s}(${v/1e6:.1f}M)" for s, v in extras)
             logger.info("[扫描] 1H 爆量追加(非 24h 池): %d 个 | %s", len(extras), detail)
-        return pool_a_syms + [s for s, _ in extras]
+        return self._apply_sustained_filter(pool_a_syms + [s for s, _ in extras])
+
+    def _apply_sustained_filter(self, symbols: List[str]) -> List[str]:
+        """持续流动性过滤:要求近 N 个收盘日的中位日 quote 成交额 >= 门槛。
+
+        点时刻 24h 门槛挡不住"暴量一天混进来、之后回落"的细币(实盘验证净亏)。
+        mode: off=不动 | observe=只记录会砍掉谁、不砍 | enforce=真砍。
+        只对已选出的池(≤ top-N + 爆量追加)拉日线,成本小。"""
+        mode = config.SUSTAINED_VOLUME_FILTER_MODE
+        if mode == "off" or not symbols:
+            return symbols
+
+        lookback = config.SUSTAINED_VOLUME_LOOKBACK_DAYS
+        floor = config.MIN_SUSTAINED_QUOTE_VOLUME
+
+        def _fetch(sym):
+            try:
+                kl = self.data_client.futures_klines(
+                    symbol=sym, interval="1d", limit=lookback + 2)
+                return sym, sustained_quote_volume(kl, lookback)
+            except Exception as e:
+                logger.debug("[持续流动性] %s 拉日线失败: %s", sym, e)
+                return sym, None  # 拉取失败 → 不据此砍单(保守)
+
+        med = {}
+        with _cf.ThreadPoolExecutor(max_workers=20) as ex:
+            for sym, v in ex.map(_fetch, symbols):
+                med[sym] = v
+
+        below = [(s, med[s]) for s in symbols if med.get(s) is not None and med[s] < floor]
+        if below:
+            detail = ", ".join(f"{s}(中位${v/1e6:.1f}M)" for s, v in below)
+            verb = "将砍" if mode == "enforce" else "观察(未砍)"
+            logger.info("[持续流动性] %s %d 个低于近%d日中位 $%.0fM 门槛: %s",
+                        verb, len(below), lookback, floor / 1e6, detail)
+        else:
+            logger.info("[持续流动性] 池内 %d 个均过近%d日中位 $%.0fM 门槛",
+                        len(symbols), lookback, floor / 1e6)
+
+        if mode == "enforce":
+            below_set = {s for s, _ in below}
+            return [s for s in symbols if s not in below_set]
+        return symbols  # observe
 
     def _scan_1h_spikes(self, symbols: List[str], min_qvol: float) -> List[tuple]:
         """Fetch last-closed 1H quote volume for each symbol in parallel.
