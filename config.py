@@ -30,7 +30,7 @@ class Config:
     LEVERAGE: int = 5
 
     # Trailing TP + Fixed SL
-    TRAILING_ACTIVATION_PCT: float = 0.03   # activate trailing when profit >= 3%
+    TRAILING_ACTIVATION_PCT: float = 0.035  # activate trailing when profit >= 3.5%
     TRAILING_DRAWDOWN_PCT: float = 0.015    # exit when price retraces 1.5% from extreme
     FIXED_STOP_LOSS_PCT: float = 0.02       # fixed stop loss 2% from entry
 
