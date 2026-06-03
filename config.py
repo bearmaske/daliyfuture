@@ -86,7 +86,7 @@ class Config:
     # MEDIAN daily quote volume over the last N closed days to clear a floor too.
     # Mode: "off" = disabled | "observe" = log what it WOULD drop, don't drop |
     #       "enforce" = actually drop. Default "observe" for a safe forward look.
-    SUSTAINED_VOLUME_FILTER_MODE: str = "observe"
+    SUSTAINED_VOLUME_FILTER_MODE: str = "enforce"
     SUSTAINED_VOLUME_LOOKBACK_DAYS: int = 7
     MIN_SUSTAINED_QUOTE_VOLUME: float = 50_000_000.0
     # Additional "spike pool": include coins whose most recent closed 1H quote
