@@ -11,6 +11,7 @@ from config import config
 from exchange import Exchange
 from state import StateManager
 from notifier import notify, logger
+from risk import calculate_atr, compute_stop_distances, compute_position_size
 
 
 def _wait_for_fresh_1h_bar(exchange: Exchange, attempts: int = 5, sleep_s: float = 1.0) -> bool:
@@ -459,7 +460,7 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
                             state_mgr.balance, config.POSITION_SIZE, symbol)
                 return
 
-            _open_position(exchange, state_mgr, symbol, trend, current_price)
+            _open_position(exchange, state_mgr, symbol, trend, current_price, data["hourly"])
             opened += 1
 
         except Exception as e:
@@ -488,20 +489,46 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
     logger.info("=" * 60)
 
 
+def compute_entry_risk(hourly_klines: list, entry_price: float) -> dict:
+    """按 STOP_MODE 计算本笔的止损距离与等风险仓位。
+    atr_dual: ATR 自适应软/硬止损 + 名义 = RISK_PER_TRADE_USD/软止损%（封顶 MAX_NOTIONAL_USD）
+    fixed:    旧逻辑（soft_stop_pct=None → 风控循环跳过软止损检查）"""
+    if config.STOP_MODE == "atr_dual" and hourly_klines:
+        closed = hourly_klines[:-1]  # drop unclosed candle
+        atr = calculate_atr(
+            [float(k[2]) for k in closed],
+            [float(k[3]) for k in closed],
+            [float(k[4]) for k in closed],
+            config.ATR_PERIOD,
+        )
+        soft_pct, hard_pct = compute_stop_distances(atr, entry_price)
+        notional, margin = compute_position_size(soft_pct)
+        return {"atr": atr, "soft_stop_pct": soft_pct, "hard_stop_pct": hard_pct,
+                "notional": notional, "margin": margin}
+    return {"atr": 0.0, "soft_stop_pct": None,
+            "hard_stop_pct": config.FIXED_STOP_LOSS_PCT,
+            "notional": config.POSITION_SIZE * config.LEVERAGE,
+            "margin": config.POSITION_SIZE}
+
+
 def _open_position(
     exchange: Exchange,
     state_mgr: StateManager,
     symbol: str,
     side: str,
     current_price: float,
+    hourly_klines: list = None,
 ):
     """Open a new position."""
     if state_mgr.get_position_by_symbol(symbol):
         logger.warning("[开仓] %s 已持仓，跳过重复开仓", symbol)
         return
 
-    notional = config.POSITION_SIZE * config.LEVERAGE
-    raw_qty = notional / current_price
+    risk_info = compute_entry_risk(hourly_klines, current_price)
+    soft_pct = risk_info["soft_stop_pct"]
+    hard_pct = risk_info["hard_stop_pct"]
+    margin = risk_info["margin"]
+    raw_qty = risk_info["notional"] / current_price
     quantity = exchange.round_quantity(symbol, raw_qty)
 
     if quantity <= 0:
@@ -531,16 +558,20 @@ def _open_position(
             entry_price=fill_price,
             quantity=executed_qty,
             open_order_id=open_order_id,
+            soft_stop_pct=soft_pct,
+            hard_stop_pct=hard_pct,
+            position_size=margin,
+            atr_at_entry=risk_info["atr"],
         )
-        state_mgr.update_balance(-config.POSITION_SIZE)
+        state_mgr.update_balance(-margin)
 
         close_side = "SELL" if side == "LONG" else "BUY"
 
-        # Fixed stop loss — STOP_MARKET at entry ± 2%
+        # 硬止损 — STOP_MARKET at entry ± hard_pct（atr_dual）或 ± FIXED_STOP_LOSS_PCT（fixed）
         try:
             raw_sl = (
-                fill_price * (1 - config.FIXED_STOP_LOSS_PCT) if side == "LONG"
-                else fill_price * (1 + config.FIXED_STOP_LOSS_PCT)
+                fill_price * (1 - hard_pct) if side == "LONG"
+                else fill_price * (1 + hard_pct)
             )
             sl_price = exchange.round_stop_price(symbol, raw_sl, side)
             if sl_price <= 0:
@@ -562,7 +593,7 @@ def _open_position(
             "实际名义 $%.2f | 保证金 $%.2f | 杠杆 %dx | orderId=%s | 余额 $%.2f",
             symbol, side, current_price, fill_price, slippage_pct,
             quantity, executed_qty, actual_notional,
-            config.POSITION_SIZE, config.LEVERAGE, open_order_id, state_mgr.balance,
+            margin, config.LEVERAGE, open_order_id, state_mgr.balance,
         )
 
         # Fetch funding rate info for notification
@@ -579,15 +610,22 @@ def _open_position(
         except Exception:
             pass
 
-        sl_price = (
-            fill_price * (1 - config.FIXED_STOP_LOSS_PCT) if side == "LONG"
-            else fill_price * (1 + config.FIXED_STOP_LOSS_PCT)
+        sl_line = (
+            fill_price * (1 - hard_pct) if side == "LONG"
+            else fill_price * (1 + hard_pct)
         )
+        soft_msg = ""
+        if soft_pct:
+            soft_line = (
+                fill_price * (1 - soft_pct) if side == "LONG"
+                else fill_price * (1 + soft_pct)
+            )
+            soft_msg = f"\n软止损(1H收盘): {soft_line:.4f} ({soft_pct*100:.1f}%)"
         notify(
             f"开仓 {side}",
             f"{symbol} | 成交价 {fill_price:.4f} | 数量 {executed_qty:g} | "
-            f"保证金 ${config.POSITION_SIZE}\n"
-            f"固定止损: {sl_price:.4f} ({config.FIXED_STOP_LOSS_PCT*100:.0f}%){funding_msg}",
+            f"保证金 ${margin:.0f}\n"
+            f"硬止损: {sl_line:.4f} ({hard_pct*100:.1f}%){soft_msg}{funding_msg}",
         )
     except BinanceAPIException as e:
         if getattr(e, "code", None) in POSITION_RISK_ERROR_CODES:
