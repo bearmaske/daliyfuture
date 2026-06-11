@@ -293,16 +293,22 @@ def _sync_positions_with_exchange(exchange: Exchange, state_mgr: StateManager):
 def _check_soft_stops(exchange: Exchange, state_mgr: StateManager, now: datetime = None):
     """软止损：每个整点后的第一个风控 tick，用最近一根已收盘 1H 的收盘价确认。
     收盘价越过软止损线 → 市价平仓。仅 atr_dual 模式、仅带 soft_stop_pct 的仓位。
-    本小时内开的仓跳过（第一次确认等下个整点 → 至少扛过第一根 K 线）。"""
+    本小时内开的仓跳过（第一次确认等下个整点 → 至少扛过第一根 K 线）。
+    K 线未滚动竞态保护：若 kl[-2] 的 open_time 早于上上整点，说明 Binance 还没推新 bar；
+    恢复 hour_key 让下一个 tick 重试本小时。"""
     if config.STOP_MODE != "atr_dual":
         return
     now = now or datetime.now(TZ_CN)
     hour_key = now.strftime("%Y-%m-%d %H")
     if state_mgr.last_soft_check_hour == hour_key:
         return
+    prev_key = state_mgr.last_soft_check_hour
     state_mgr.set_last_soft_check_hour(hour_key)
 
     hour_start = now.replace(minute=0, second=0, microsecond=0)
+    hour_start_ms = int(hour_start.timestamp() * 1000)
+    HOUR_MS = 3_600_000
+    stale = False
     for pos in list(state_mgr.state.get("positions", [])):
         soft_pct = pos.get("soft_stop_pct")
         if not soft_pct:
@@ -312,6 +318,10 @@ def _check_soft_stops(exchange: Exchange, state_mgr: StateManager, now: datetime
             continue
         try:
             kl = exchange.get_klines(pos["symbol"], "1h", 2)
+            bar_open_ms = int(kl[-2][0])
+            if bar_open_ms < hour_start_ms - HOUR_MS:
+                stale = True  # K线尚未滚动，整小时稍后重试
+                continue
             bar_close = float(kl[-2][4])  # 最近一根已收盘 1H 的收盘价
         except Exception as e:
             logger.warning("[软止损] %s 拉K线失败,本小时跳过: %s", pos["symbol"], e)
@@ -321,6 +331,10 @@ def _check_soft_stops(exchange: Exchange, state_mgr: StateManager, now: datetime
                         pos["symbol"], pos["side"], bar_close,
                         pos["entry_price"], soft_pct * 100)
             _close_position(exchange, state_mgr, pos, bar_close, "软止损(1H收盘)")
+
+    if stale:
+        # 有 symbol 的刚收盘 K 线还没出来：恢复上一个 hour key，下个 tick 重试本小时
+        state_mgr.set_last_soft_check_hour(prev_key or "")
 
 
 def check_stop_loss(exchange: Exchange, state_mgr: StateManager):

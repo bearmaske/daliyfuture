@@ -213,11 +213,12 @@ def _mk_state(tmp_path):
 
 
 def _mk_exchange(closed_bar_close):
-    """MagicMock Exchange：get_klines 返回 [已收盘bar, 未收盘bar]。"""
+    """MagicMock Exchange：get_klines 返回 [已收盘bar(13:00), 未收盘bar(14:00)]。"""
+    closed_open_ms = int(datetime(2026, 6, 11, 13, 0, tzinfo=TZ_CN).timestamp() * 1000)
     ex = MagicMock()
     ex.get_klines.return_value = [
-        [0, "0", "0", "0", str(closed_bar_close), "0", 0, "0"],
-        [1, "0", "0", "0", "0", "0", 0, "0"],
+        [closed_open_ms, "0", "0", "0", str(closed_bar_close), "0", 0, "0"],
+        [closed_open_ms + 3_600_000, "0", "0", "0", "0", "0", 0, "0"],
     ]
     ex.get_order_fill.return_value = (closed_bar_close, 10.0)
     return ex
@@ -299,4 +300,29 @@ def test_soft_stop_short_side(tmp_path, monkeypatch):
     _add_soft_pos(sm, "2026-06-11 13:01:00", side="SHORT", entry=100.0, soft=0.03)
     ex = _mk_exchange(103.5)                           # 收盘 103.5 > 103 → SHORT 触发
     _check_soft_stops(ex, sm, now=NOW)
+    assert sm.state["positions"] == []
+
+
+def test_soft_stop_stale_bar_retries_next_tick(tmp_path, monkeypatch):
+    monkeypatch.setattr(risk.config, "STOP_MODE", "atr_dual")
+    sm = _mk_state(tmp_path)
+    _add_soft_pos(sm, "2026-06-11 13:01:00")
+    # 刚收盘 bar 应为 13:00 开盘；返回 12:00 开盘的旧 bar → 未滚动
+    stale_open_ms = int(datetime(2026, 6, 11, 12, 0, tzinfo=TZ_CN).timestamp() * 1000)
+    ex = MagicMock()
+    ex.get_klines.return_value = [
+        [stale_open_ms, "0", "0", "0", "90.0", "0", 0, "0"],
+        [stale_open_ms + 3_600_000, "0", "0", "0", "0", "0", 0, "0"],
+    ]
+    _check_soft_stops(ex, sm, now=NOW)
+    # 旧 bar 收盘 90 远低于软止损线，但不应触发（数据未滚动）
+    assert len(sm.state["positions"]) == 1
+    # hour key 已回滚 → 同一小时的下一个 tick 会重试
+    fresh_open_ms = int(datetime(2026, 6, 11, 13, 0, tzinfo=TZ_CN).timestamp() * 1000)
+    ex.get_klines.return_value = [
+        [fresh_open_ms, "0", "0", "0", "96.5", "0", 0, "0"],
+        [fresh_open_ms + 3_600_000, "0", "0", "0", "0", "0", 0, "0"],
+    ]
+    ex.get_order_fill.return_value = (96.5, 10.0)
+    _check_soft_stops(ex, sm, now=NOW.replace(minute=2))
     assert sm.state["positions"] == []

@@ -54,11 +54,20 @@ def main():
     logger.info("[配置] 交易模式: %s", mode_label)
     logger.info("[配置] 初始资金: $%.2f | 单仓: $%.2f | 最大持仓: %d",
                 config.INITIAL_CAPITAL, config.POSITION_SIZE, config.MAX_POSITIONS)
-    logger.info("[配置] 杠杆: %dx | 固定止损: %.1f%% | 移动止盈: 激活≥%.1f%% 回撤≥%.1f%%",
-                config.LEVERAGE,
-                config.FIXED_STOP_LOSS_PCT * 100,
-                config.TRAILING_ACTIVATION_PCT * 100,
-                config.TRAILING_DRAWDOWN_PCT * 100)
+    if config.STOP_MODE == "atr_dual":
+        logger.info("[配置] 杠杆: %dx | 止损: 双层ATR (软 max(%.0f%%, %.1f×ATR) 1H收盘确认 | "
+                    "硬 min(2×软, %.0f%%) 交易所挂单 | 单笔风险 $%.0f) | 移动止盈: 激活≥%.1f%% 回撤≥%.1f%%",
+                    config.LEVERAGE,
+                    config.SOFT_STOP_FLOOR_PCT * 100, config.SOFT_STOP_ATR_MULT,
+                    config.HARD_STOP_CAP_PCT * 100, config.RISK_PER_TRADE_USD,
+                    config.TRAILING_ACTIVATION_PCT * 100,
+                    config.TRAILING_DRAWDOWN_PCT * 100)
+    else:
+        logger.info("[配置] 杠杆: %dx | 固定止损: %.1f%% | 移动止盈: 激活≥%.1f%% 回撤≥%.1f%%",
+                    config.LEVERAGE,
+                    config.FIXED_STOP_LOSS_PCT * 100,
+                    config.TRAILING_ACTIVATION_PCT * 100,
+                    config.TRAILING_DRAWDOWN_PCT * 100)
     logger.info("[配置] 布林带: SMA%d ± %.1fσ | 扫描前 %d 大成交量币种",
                 config.BB_PERIOD, config.BB_STD, config.TOP_SYMBOLS_COUNT)
 
@@ -388,7 +397,7 @@ def _heartbeat(exchange: Exchange, state_mgr: StateManager):
             try:
                 current_price = exchange.get_price(pos["symbol"])
                 pnl = calculate_pnl(pos["side"], pos["entry_price"], current_price, pos.get("quantity"))
-                pnl_pct = pnl / config.POSITION_SIZE * 100
+                pnl_pct = pnl / (pos.get("position_size") or config.POSITION_SIZE) * 100
                 sign = "+" if pnl >= 0 else ""
                 lines.append(
                     f"{pos['symbol']} {pos['side']} | 入场: {pos['entry_price']:.4f} | "

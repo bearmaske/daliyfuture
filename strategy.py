@@ -528,6 +528,11 @@ def _open_position(
     soft_pct = risk_info["soft_stop_pct"]
     hard_pct = risk_info["hard_stop_pct"]
     margin = risk_info["margin"]
+
+    if state_mgr.balance < margin:
+        logger.info("[开仓] %s 余额不足 $%.2f < 保证金 $%.2f，跳过", symbol, state_mgr.balance, margin)
+        return
+
     raw_qty = risk_info["notional"] / current_price
     quantity = exchange.round_quantity(symbol, raw_qty)
 
