@@ -34,7 +34,7 @@ python -m backtesting.backtest --symbols BTCUSDT,ETHUSDT --capital 20000 --lever
 
 The bot uses APScheduler with three jobs:
 - **Strategy scan** (`strategy.py:run_strategy`) — runs at :01 every hour. Scans top N symbols by volume, checks daily trend (SMA20 slope direction) then hourly Bollinger Band breakout for entry signals.
-- **Risk check** (`risk.py:check_stop_loss`) — runs every 2 minutes. Exit via ATR-based dynamic trailing stop: stop line = extreme price ± ATR × multiplier (only tightens, never loosens), with a hard 6% max drawdown cap.
+- **Risk check** (`risk.py:check_stop_loss`) — runs every minute. Dual-layer stops (`STOP_MODE="atr_dual"`): soft stop = ATR-adaptive distance (max(2%, 1.5×ATR14(1H)/price)), confirmed only on 1H close (local check, once per hour); hard stop = min(2×soft, 6%) as a resting exchange STOP_MARKET order (gap/offline protection). Trailing TP activates at +3.5% profit (exchange TRAILING_STOP_MARKET, 1.5% callback). Position notional = $40 risk / soft-stop pct, capped at $2,000 (equal-risk sizing). `STOP_MODE="fixed"` rolls back to the legacy flat 2% exchange stop.
 - **Heartbeat** (`main.py:_heartbeat`) — runs every 6 hours. Sends a portfolio summary notification.
 
 **Dual-client design** in `exchange.py`: `data_client` hits mainnet (no auth, better data quality) for klines/prices; `testnet_client` (lazy-init, needs API keys) handles order placement and account queries.
