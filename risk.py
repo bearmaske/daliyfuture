@@ -54,6 +54,27 @@ def calculate_pnl(side: str, entry_price: float, exit_price: float, quantity: fl
     return (entry_price - exit_price) / entry_price * config.POSITION_SIZE * config.LEVERAGE
 
 
+def calculate_atr(highs: List[float], lows: List[float], closes: List[float],
+                  period: int = 14) -> float:
+    """Wilder ATR。数据不足（< period+1 根）或长度不一致时返回 0.0。
+    调用方负责丢掉最后一根未收盘 K 线（项目惯例）。"""
+    n = len(closes)
+    if n < period + 1 or len(highs) != n or len(lows) != n:
+        return 0.0
+    trs = []
+    for i in range(1, n):
+        tr = max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i] - closes[i - 1]),
+        )
+        trs.append(tr)
+    atr = sum(trs[:period]) / period
+    for tr in trs[period:]:
+        atr = (atr * (period - 1) + tr) / period
+    return atr
+
+
 def check_fixed_sl(side: str, entry_price: float, current_price: float, sl_pct: float) -> bool:
     """Fixed stop loss: close if price moves sl_pct against entry."""
     if side == "LONG":

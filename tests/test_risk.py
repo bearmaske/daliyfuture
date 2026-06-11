@@ -75,3 +75,44 @@ def test_trailing_tp_short_triggers():
     )
     # trail_stop = 96 * 1.01 = 96.96; 97.0 >= 96.96 → triggered
     assert triggered is True
+
+
+# ---------- calculate_atr ----------
+
+from risk import calculate_atr
+
+
+def test_atr_constant_range():
+    # 每根 K 线 high-low=2、无跳空 → TR 恒为 2 → ATR=2
+    n = 16
+    highs = [101.0] * n
+    lows = [99.0] * n
+    closes = [100.0] * n
+    assert calculate_atr(highs, lows, closes, period=14) == pytest.approx(2.0)
+
+
+def test_atr_uses_prev_close_for_gaps():
+    # period=2: TR1 = max(1, |12-9.5|, |11-9.5|) = 2.5; TR2 = max(1, |20-11.5|, |19-11.5|) = 8.5
+    # 初始 ATR = (2.5+8.5)/2 = 5.5
+    highs = [10.0, 12.0, 20.0]
+    lows = [9.0, 11.0, 19.0]
+    closes = [9.5, 11.5, 19.5]
+    assert calculate_atr(highs, lows, closes, period=2) == pytest.approx(5.5)
+
+
+def test_atr_wilder_smoothing():
+    # 在上例后追加一根: TR3 = max(1, |21-19.5|, |20-19.5|) = 1.5
+    # ATR = (5.5×(2-1) + 1.5)/2 = 3.5
+    highs = [10.0, 12.0, 20.0, 21.0]
+    lows = [9.0, 11.0, 19.0, 20.0]
+    closes = [9.5, 11.5, 19.5, 20.5]
+    assert calculate_atr(highs, lows, closes, period=2) == pytest.approx(3.5)
+
+
+def test_atr_insufficient_data_returns_zero():
+    # 需要 period+1 根，14 根不够
+    assert calculate_atr([1.0] * 14, [1.0] * 14, [1.0] * 14, period=14) == 0.0
+
+
+def test_atr_mismatched_lengths_returns_zero():
+    assert calculate_atr([1.0] * 16, [1.0] * 15, [1.0] * 16, period=14) == 0.0
