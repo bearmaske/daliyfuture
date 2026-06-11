@@ -46,6 +46,9 @@ def main():
     parser.add_argument("--position-size", type=float, default=config.POSITION_SIZE, help="Position size per trade")
     parser.add_argument("--leverage", type=int, default=config.LEVERAGE, help="Leverage multiplier")
     parser.add_argument("--max-positions", type=int, default=config.MAX_POSITIONS, help="Max concurrent positions")
+    parser.add_argument("--stop-mode", type=str, default=config.STOP_MODE,
+                        choices=["fixed", "atr_dual"],
+                        help="止损模式: fixed=旧2%%固定止损 | atr_dual=双层ATR止损")
     args = parser.parse_args()
 
     symbols = [s.strip() for s in args.symbols.split(",")]
@@ -58,6 +61,7 @@ def main():
     print(f"  Position Size: ${args.position_size:,.0f}")
     print(f"  Leverage:      {args.leverage}x")
     print(f"  Max Positions: {args.max_positions}")
+    print(f"  Stop Mode:     {args.stop_mode}")
     print("=" * 60)
     print()
 
@@ -77,6 +81,7 @@ def main():
         position_size=args.position_size,
         leverage=args.leverage,
         max_positions=args.max_positions,
+        stop_mode=args.stop_mode,
     )
     trades, equity_curve = engine.run(data)
 
