@@ -71,6 +71,8 @@ class StateManager:
     def add_position(
         self, symbol: str, side: str, entry_price: float, quantity: float,
         open_order_id: int = None,
+        soft_stop_pct: float = None, hard_stop_pct: float = None,
+        position_size: float = None, atr_at_entry: float = None,
     ) -> dict:
         with self._lock:
             pos = {
@@ -86,6 +88,10 @@ class StateManager:
                 "trailing_order_id": None,
                 "open_order_id": open_order_id,
                 "opened_at": now_cn(),
+                "soft_stop_pct": soft_stop_pct,
+                "hard_stop_pct": hard_stop_pct,
+                "position_size": position_size,
+                "atr_at_entry": atr_at_entry,
             }
             self.state["positions"].append(pos)
         self.save()
@@ -138,6 +144,16 @@ class StateManager:
                 if pos["id"] == position_id:
                     pos["trailing_activated"] = True
                     break
+        self.save()
+
+    @property
+    def last_soft_check_hour(self):
+        """软止损收盘确认的去重键：'YYYY-MM-DD HH'，每小时只跑一次。"""
+        return self.state.get("last_soft_check_hour")
+
+    def set_last_soft_check_hour(self, hour_key: str):
+        with self._lock:
+            self.state["last_soft_check_hour"] = hour_key
         self.save()
 
     def update_extreme_price(self, position_id: str, current_price: float):

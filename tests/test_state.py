@@ -202,3 +202,36 @@ def test_blacklist_per_symbol(state_mgr):
     state_mgr.add_symbol_blacklist("METUSDT", reason="x", hours=24)
     assert state_mgr.symbol_blacklist_remaining("METUSDT") is not None
     assert state_mgr.symbol_blacklist_remaining("BTCUSDT") is None
+
+
+def test_add_position_with_stop_fields(state_mgr):
+    state_mgr.load()
+    pos = state_mgr.add_position(
+        symbol="ETHUSDT", side="SHORT", entry_price=3000.0, quantity=0.5,
+        soft_stop_pct=0.03, hard_stop_pct=0.06, position_size=222.0, atr_at_entry=60.0,
+    )
+    assert pos["soft_stop_pct"] == 0.03
+    assert pos["hard_stop_pct"] == 0.06
+    assert pos["position_size"] == 222.0
+    assert pos["atr_at_entry"] == 60.0
+
+
+def test_add_position_stop_fields_default_none(state_mgr):
+    # 不传新参数（旧调用方式）→ 字段存在且为 None（存量兼容由 risk.py 回退处理）
+    state_mgr.load()
+    pos = state_mgr.add_position(
+        symbol="BTCUSDT", side="LONG", entry_price=65000.0, quantity=0.01,
+    )
+    assert pos["soft_stop_pct"] is None
+    assert pos["hard_stop_pct"] is None
+    assert pos["position_size"] is None
+
+
+def test_last_soft_check_hour_roundtrip(state_mgr):
+    state_mgr.load()
+    assert state_mgr.last_soft_check_hour is None
+    state_mgr.set_last_soft_check_hour("2026-06-11 14")
+    assert state_mgr.last_soft_check_hour == "2026-06-11 14"
+    # 持久化验证：重新 load 后仍在
+    state_mgr.load()
+    assert state_mgr.last_soft_check_hour == "2026-06-11 14"
