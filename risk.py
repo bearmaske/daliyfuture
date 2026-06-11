@@ -59,7 +59,7 @@ def calculate_atr(highs: List[float], lows: List[float], closes: List[float],
     """Wilder ATR。数据不足（< period+1 根）或长度不一致时返回 0.0。
     调用方负责丢掉最后一根未收盘 K 线（项目惯例）。"""
     n = len(closes)
-    if n < period + 1 or len(highs) != n or len(lows) != n:
+    if period <= 0 or n < period + 1 or len(highs) != n or len(lows) != n:
         return 0.0
     trs = []
     for i in range(1, n):

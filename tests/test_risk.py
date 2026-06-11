@@ -1,5 +1,5 @@
 import pytest
-from risk import check_fixed_sl, check_trailing_tp
+from risk import check_fixed_sl, check_trailing_tp, calculate_atr
 
 
 def test_fixed_sl_long_not_triggered():
@@ -79,8 +79,6 @@ def test_trailing_tp_short_triggers():
 
 # ---------- calculate_atr ----------
 
-from risk import calculate_atr
-
 
 def test_atr_constant_range():
     # 每根 K 线 high-low=2、无跳空 → TR 恒为 2 → ATR=2
@@ -116,3 +114,8 @@ def test_atr_insufficient_data_returns_zero():
 
 def test_atr_mismatched_lengths_returns_zero():
     assert calculate_atr([1.0] * 16, [1.0] * 15, [1.0] * 16, period=14) == 0.0
+
+
+def test_atr_non_positive_period_returns_zero():
+    assert calculate_atr([1.0] * 16, [1.0] * 16, [1.0] * 16, period=0) == 0.0
+    assert calculate_atr([1.0] * 16, [1.0] * 16, [1.0] * 16, period=-1) == 0.0
