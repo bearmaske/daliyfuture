@@ -11,20 +11,25 @@ from notifier import notify, logger
 TZ_CN = timezone(timedelta(hours=8))
 
 
-def _position_age(opened_at: str) -> str:
-    """Return human-readable age of a position, e.g. '3h12m' or '45m'."""
-    if not opened_at:
-        return "?"
+def _parse_position_dt(value: str):
+    """Parse opened_at in any historical format. Returns aware datetime or None."""
+    if not value:
+        return None
     fmts = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z")
-    dt = None
     for f in fmts:
         try:
-            dt = datetime.strptime(opened_at, f)
+            dt = datetime.strptime(value, f)
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=TZ_CN)
-            break
+            return dt
         except ValueError:
             continue
+    return None
+
+
+def _position_age(opened_at: str) -> str:
+    """Return human-readable age of a position, e.g. '3h12m' or '45m'."""
+    dt = _parse_position_dt(opened_at)
     if dt is None:
         return "?"
     seconds = int((datetime.now(TZ_CN) - dt).total_seconds())
@@ -285,6 +290,39 @@ def _sync_positions_with_exchange(exchange: Exchange, state_mgr: StateManager):
         _notify_close(pos, fill_price, executed_qty, reason)
 
 
+def _check_soft_stops(exchange: Exchange, state_mgr: StateManager, now: datetime = None):
+    """软止损：每个整点后的第一个风控 tick，用最近一根已收盘 1H 的收盘价确认。
+    收盘价越过软止损线 → 市价平仓。仅 atr_dual 模式、仅带 soft_stop_pct 的仓位。
+    本小时内开的仓跳过（第一次确认等下个整点 → 至少扛过第一根 K 线）。"""
+    if config.STOP_MODE != "atr_dual":
+        return
+    now = now or datetime.now(TZ_CN)
+    hour_key = now.strftime("%Y-%m-%d %H")
+    if state_mgr.last_soft_check_hour == hour_key:
+        return
+    state_mgr.set_last_soft_check_hour(hour_key)
+
+    hour_start = now.replace(minute=0, second=0, microsecond=0)
+    for pos in list(state_mgr.state.get("positions", [])):
+        soft_pct = pos.get("soft_stop_pct")
+        if not soft_pct:
+            continue  # 存量仓位（旧逻辑）
+        opened = _parse_position_dt(pos.get("opened_at"))
+        if opened is None or opened >= hour_start:
+            continue
+        try:
+            kl = exchange.get_klines(pos["symbol"], "1h", 2)
+            bar_close = float(kl[-2][4])  # 最近一根已收盘 1H 的收盘价
+        except Exception as e:
+            logger.warning("[软止损] %s 拉K线失败,本小时跳过: %s", pos["symbol"], e)
+            continue
+        if check_fixed_sl(pos["side"], pos["entry_price"], bar_close, soft_pct):
+            logger.info("[软止损] %s %s | 1H收盘 %.4f 越过软止损线 (入场 %.4f, %.2f%%) | 平仓",
+                        pos["symbol"], pos["side"], bar_close,
+                        pos["entry_price"], soft_pct * 100)
+            _close_position(exchange, state_mgr, pos, bar_close, "软止损(1H收盘)")
+
+
 def check_stop_loss(exchange: Exchange, state_mgr: StateManager):
     """Check all open positions.
 
@@ -297,6 +335,7 @@ def check_stop_loss(exchange: Exchange, state_mgr: StateManager):
 
     # Sync local state with exchange first — catches stops triggered while offline
     _sync_positions_with_exchange(exchange, state_mgr)
+    _check_soft_stops(exchange, state_mgr)
 
     positions = list(state_mgr.state.get("positions", []))
     if not positions:

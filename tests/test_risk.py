@@ -1,5 +1,10 @@
 import pytest
-from risk import check_fixed_sl, check_trailing_tp, calculate_atr, compute_stop_distances, compute_position_size, _pos_hard_stop_pct, _pos_margin, calculate_pnl
+from datetime import datetime
+from unittest.mock import MagicMock
+from risk import check_fixed_sl, check_trailing_tp, calculate_atr, compute_stop_distances, compute_position_size, _pos_hard_stop_pct, _pos_margin, calculate_pnl, _check_soft_stops
+from risk import TZ_CN
+import risk
+from state import StateManager
 
 
 def test_fixed_sl_long_not_triggered():
@@ -195,3 +200,103 @@ def test_calculate_pnl_fallback_uses_position_size_param():
     # 无 quantity 时用名义公式：1% × margin × LEVERAGE(5)
     pnl = calculate_pnl("LONG", 100.0, 101.0, quantity=None, position_size=200.0)
     assert pnl == pytest.approx(0.01 * 200.0 * 5)
+
+
+# ---------- 软止损 (1H 收盘确认) ----------
+
+
+def _mk_state(tmp_path):
+    sm = StateManager(str(tmp_path / "s.json"), str(tmp_path / "b.json"),
+                      initial_capital=10000.0)
+    sm.load()
+    return sm
+
+
+def _mk_exchange(closed_bar_close):
+    """MagicMock Exchange：get_klines 返回 [已收盘bar, 未收盘bar]。"""
+    ex = MagicMock()
+    ex.get_klines.return_value = [
+        [0, "0", "0", "0", str(closed_bar_close), "0", 0, "0"],
+        [1, "0", "0", "0", "0", "0", 0, "0"],
+    ]
+    ex.get_order_fill.return_value = (closed_bar_close, 10.0)
+    return ex
+
+
+def _add_soft_pos(sm, opened_at, side="LONG", entry=100.0, soft=0.03):
+    pos = sm.add_position(symbol="AAAUSDT", side=side, entry_price=entry,
+                          quantity=10.0, soft_stop_pct=soft, hard_stop_pct=0.06,
+                          position_size=266.0)
+    pos["opened_at"] = opened_at
+    sm.save()
+    return pos
+
+
+NOW = datetime(2026, 6, 11, 14, 1, 0, tzinfo=TZ_CN)
+
+
+def test_soft_stop_closes_position_on_breached_close(tmp_path, monkeypatch):
+    monkeypatch.setattr(risk.config, "STOP_MODE", "atr_dual")
+    sm = _mk_state(tmp_path)
+    _add_soft_pos(sm, "2026-06-11 13:01:00")          # 上一小时开仓
+    ex = _mk_exchange(96.5)                            # 收盘 96.5 < 软止损线 97
+    _check_soft_stops(ex, sm, now=NOW)
+    assert sm.state["positions"] == []
+    ex.place_order.assert_called_once()
+
+
+def test_soft_stop_no_trigger_when_close_above_line(tmp_path, monkeypatch):
+    monkeypatch.setattr(risk.config, "STOP_MODE", "atr_dual")
+    sm = _mk_state(tmp_path)
+    _add_soft_pos(sm, "2026-06-11 13:01:00")
+    ex = _mk_exchange(97.5)                            # 收盘 97.5 > 97，盘中无所谓
+    _check_soft_stops(ex, sm, now=NOW)
+    assert len(sm.state["positions"]) == 1
+    ex.place_order.assert_not_called()
+
+
+def test_soft_stop_skips_position_opened_this_hour(tmp_path, monkeypatch):
+    monkeypatch.setattr(risk.config, "STOP_MODE", "atr_dual")
+    sm = _mk_state(tmp_path)
+    _add_soft_pos(sm, "2026-06-11 14:00:30")           # 本小时刚开 → 等下个整点
+    ex = _mk_exchange(90.0)
+    _check_soft_stops(ex, sm, now=NOW)
+    assert len(sm.state["positions"]) == 1
+
+
+def test_soft_stop_skips_legacy_position_without_field(tmp_path, monkeypatch):
+    monkeypatch.setattr(risk.config, "STOP_MODE", "atr_dual")
+    sm = _mk_state(tmp_path)
+    sm.add_position(symbol="OLDUSDT", side="LONG", entry_price=100.0, quantity=10.0)
+    ex = _mk_exchange(50.0)
+    _check_soft_stops(ex, sm, now=NOW)
+    assert len(sm.state["positions"]) == 1
+    ex.get_klines.assert_not_called()
+
+
+def test_soft_stop_runs_once_per_hour(tmp_path, monkeypatch):
+    monkeypatch.setattr(risk.config, "STOP_MODE", "atr_dual")
+    sm = _mk_state(tmp_path)
+    _add_soft_pos(sm, "2026-06-11 13:01:00")
+    ex = _mk_exchange(97.5)
+    _check_soft_stops(ex, sm, now=NOW)
+    _check_soft_stops(ex, sm, now=NOW.replace(minute=2))  # 同一小时第二次 tick
+    assert ex.get_klines.call_count == 1
+
+
+def test_soft_stop_disabled_in_fixed_mode(tmp_path, monkeypatch):
+    monkeypatch.setattr(risk.config, "STOP_MODE", "fixed")
+    sm = _mk_state(tmp_path)
+    _add_soft_pos(sm, "2026-06-11 13:01:00")
+    ex = _mk_exchange(50.0)
+    _check_soft_stops(ex, sm, now=NOW)
+    assert len(sm.state["positions"]) == 1
+
+
+def test_soft_stop_short_side(tmp_path, monkeypatch):
+    monkeypatch.setattr(risk.config, "STOP_MODE", "atr_dual")
+    sm = _mk_state(tmp_path)
+    _add_soft_pos(sm, "2026-06-11 13:01:00", side="SHORT", entry=100.0, soft=0.03)
+    ex = _mk_exchange(103.5)                           # 收盘 103.5 > 103 → SHORT 触发
+    _check_soft_stops(ex, sm, now=NOW)
+    assert sm.state["positions"] == []
