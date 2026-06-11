@@ -148,6 +148,10 @@ class BacktestEngine:
         MIN_MS = 60_000
 
         for ts in hourly_timeline:
+            # 0. 软止损收盘确认 — 先于分钟网格，与实盘整点 tick 顺序一致
+            if self.positions:
+                self._check_soft_stops_hour(ts, data)
+
             # 1. Intrabar stop-loss checks across the preceding hour
             # Run on the minute grid [ts, ts+HOUR_MS) at the configured stride.
             if self._minute_data and self.positions:
@@ -405,27 +409,37 @@ class BacktestEngine:
         for pos, exit_price, reason, ts in to_close:
             self._close_position(pos, exit_price, reason, ts)
 
-    def _check_stops_hour(self, current_ts: int, data: dict):
-        """Hourly checks: soft stop (atr_dual, close-confirmed on the just-closed
-        bar, ALL positions) + hard/trailing close-only fallback for symbols
-        without minute data."""
+    def _check_soft_stops_hour(self, current_ts: int, data: dict):
+        """软止损（atr_dual）：在每个整点先于分钟网格执行，对所有持仓用刚收盘的
+        那根 1H 收盘价确认（入场 bar 收盘即第一次检查）。与实盘顺序一致：
+        实盘的软止损在整点后第一个风控 tick 触发，先于该小时内的任何盘中价格。"""
+        if self.stop_mode != "atr_dual":
+            return
         HOUR_MS = 3600_000
         to_close = []
         for pos in self.positions:
             if pos.symbol not in data:
                 continue
             hourly_df, _ = data[pos.symbol]
-
-            # --- 软止损：检查刚收盘的那根 1H（入场 bar 收盘即第一次检查）---
-            if (self.stop_mode == "atr_dual" and pos.soft_stop_pct > 0
-                    and pos.opened_ms <= current_ts - HOUR_MS):
+            if pos.soft_stop_pct > 0 and pos.opened_ms <= current_ts - HOUR_MS:
                 closed_bar = hourly_df[hourly_df["open_time"] == current_ts - HOUR_MS]
                 if not closed_bar.empty:
                     bar_close = float(closed_bar.iloc[0]["close"])
                     if check_fixed_sl(pos.side, pos.entry_price, bar_close, pos.soft_stop_pct):
                         exit_price = apply_slippage(bar_close, pos.side, is_entry=False)
                         to_close.append((pos, exit_price, "soft_sl", current_ts))
-                        continue
+        for pos, exit_price, reason, ts in to_close:
+            self._close_position(pos, exit_price, reason, ts)
+
+    def _check_stops_hour(self, current_ts: int, data: dict):
+        """Hourly checks: hard/trailing close-only fallback for symbols
+        without minute data. Soft stop (atr_dual) is handled by
+        _check_soft_stops_hour, which runs before the minute grid."""
+        to_close = []
+        for pos in self.positions:
+            if pos.symbol not in data:
+                continue
+            hourly_df, _ = data[pos.symbol]
 
             if pos.symbol in self._minute_data:
                 continue  # 硬止损/移动止盈在分钟网格处理

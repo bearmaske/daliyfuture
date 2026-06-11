@@ -200,7 +200,7 @@ def test_soft_stop_fires_on_entry_bar_close():
     eng.positions.append(_soft_pos(opened_ms=0))
     df = _mk_hourly_df([(0, 100.0, 101.0, 95.0, 96.5),
                         (HOUR_MS, 96.0, 97.0, 95.5, 96.8)])
-    eng._check_stops_hour(HOUR_MS, {"X": (df, None)})
+    eng._check_soft_stops_hour(HOUR_MS, {"X": (df, None)})
     assert len(eng.trades) == 1
     assert eng.trades[0].exit_reason == "soft_sl"
 
@@ -211,9 +211,31 @@ def test_soft_stop_survives_intrabar_dip():
     eng.positions.append(_soft_pos(opened_ms=0))
     df = _mk_hourly_df([(0, 100.0, 101.0, 95.0, 98.0),
                         (HOUR_MS, 98.0, 99.0, 97.5, 98.5)])
+    eng._check_soft_stops_hour(HOUR_MS, {"X": (df, None)})
     eng._check_stops_hour(HOUR_MS, {"X": (df, None)})
     assert eng.trades == []
     assert len(eng.positions) == 1
+
+
+def test_soft_stop_precedes_minute_grid_in_run():
+    """软止损必须在分钟网格之前执行：bar0 收盘已破软止损线，
+    bar1 盘中又破硬止损 — 必须以 soft_sl 出场而不是 hard_sl。"""
+    eng = _mk_engine("atr_dual")
+    eng.positions.append(_soft_pos(opened_ms=0))
+    hourly = _mk_hourly_df([(0, 100.0, 101.0, 95.0, 96.5),
+                            (HOUR_MS, 96.0, 97.0, 92.0, 93.0)])
+    minute_df = pd.DataFrame([
+        {"open_time": HOUR_MS + 60_000, "open": 96.0, "high": 96.0,
+         "low": 92.5, "close": 93.0, "volume": 1.0},
+    ])
+    eng._minute_data = {"X": minute_df}
+    data = {"X": (hourly, None)}
+    # 模拟 run() 在 ts=HOUR_MS 的步骤顺序
+    eng._check_soft_stops_hour(HOUR_MS, data)
+    if eng.positions:
+        eng._check_stops_minute(HOUR_MS + 60_000)
+    assert len(eng.trades) == 1
+    assert eng.trades[0].exit_reason == "soft_sl"
 
 
 def test_hard_stop_fires_intrabar_on_minute_grid():
