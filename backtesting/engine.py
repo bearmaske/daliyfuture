@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from config import config
 from strategy import calculate_bollinger_bands, check_trend, check_trend_asymmetric, check_trend_bb_middle, check_trend_rolling
-from risk import check_fixed_sl, check_trailing_tp
+from risk import check_fixed_sl, check_trailing_tp, calculate_atr, compute_stop_distances
 
 TZ_CN = timezone(timedelta(hours=8))
 
@@ -36,6 +36,10 @@ class BacktestPosition:
     highest_price: float = 0.0
     lowest_price: float = 0.0
     trailing_activated: bool = False
+    soft_stop_pct: float = 0.0
+    hard_stop_pct: float = 0.0
+    notional: float = 0.0
+    margin: float = 0.0
 
     def __post_init__(self):
         if self.highest_price == 0.0:
@@ -88,6 +92,7 @@ class BacktestEngine:
         fixed_stop_loss_pct: float = config.FIXED_STOP_LOSS_PCT,
         stop_check_minutes: int = 60,
         trend_timeframe_hours: int = 24,
+        stop_mode: str = None,
     ):
         self.initial_capital = initial_capital
         self.balance = initial_capital
@@ -103,6 +108,8 @@ class BacktestEngine:
         self.stop_check_minutes = stop_check_minutes
         self.trend_timeframe_hours = trend_timeframe_hours
         self._trend_tf_ms = trend_timeframe_hours * 3600_000
+        self.stop_mode = stop_mode or config.STOP_MODE
+        self.atr_period = config.ATR_PERIOD
 
         self.positions: list[BacktestPosition] = []
         self.trades: list[BacktestTrade] = []
@@ -207,6 +214,22 @@ class BacktestEngine:
         losses.sort()
         anchor_ms = losses[threshold - 1]
         return current_ts - anchor_ms < cooldown_ms
+
+    def _entry_sizing(self, h_closed: pd.DataFrame, exec_price: float):
+        """按 stop_mode 计算 (软止损%, 硬止损%, 名义, 保证金, ATR)。
+        atr_dual 的距离/风险参数读 config（与实盘同源）；杠杆用引擎参数。"""
+        if self.stop_mode == "atr_dual":
+            atr = calculate_atr(
+                h_closed["high"].astype(float).tolist(),
+                h_closed["low"].astype(float).tolist(),
+                h_closed["close"].astype(float).tolist(),
+                self.atr_period,
+            )
+            soft, hard = compute_stop_distances(atr, exec_price)
+            notional = min(config.RISK_PER_TRADE_USD / soft, config.MAX_NOTIONAL_USD)
+            return soft, hard, notional, notional / self.leverage, atr
+        notional = self.position_size * self.leverage
+        return 0.0, self.fixed_stop_loss_pct, notional, self.position_size, 0.0
 
     def _check_signal(
         self,
@@ -313,7 +336,7 @@ class BacktestEngine:
         exec_price = float(current_bar.iloc[0]["open"])
         exec_price = apply_slippage(exec_price, trend, is_entry=True)
 
-        notional = self.position_size * self.leverage
+        soft_pct, hard_pct, notional, margin, _atr = self._entry_sizing(h_closed, exec_price)
         quantity = notional / exec_price
         fee = calculate_fee(notional)
 
@@ -326,9 +349,13 @@ class BacktestEngine:
             quantity=quantity,
             opened_at=ts_str,
             opened_ms=current_ts,
+            soft_stop_pct=soft_pct,
+            hard_stop_pct=hard_pct,
+            notional=notional,
+            margin=margin,
         )
         self.positions.append(pos)
-        self.balance -= self.position_size
+        self.balance -= margin
         self.balance -= fee
 
     def _check_stops_minute(self, minute_ts: int):
@@ -353,9 +380,11 @@ class BacktestEngine:
 
             extreme_price = pos.highest_price if pos.side == "LONG" else pos.lowest_price
 
-            if check_fixed_sl(pos.side, pos.entry_price, current_price, self.fixed_stop_loss_pct):
+            hard_pct = pos.hard_stop_pct or self.fixed_stop_loss_pct
+            if check_fixed_sl(pos.side, pos.entry_price, current_price, hard_pct):
                 exit_price = apply_slippage(current_price, pos.side, is_entry=False)
-                to_close.append((pos, exit_price, "fixed_sl", minute_ts))
+                reason = "hard_sl" if self.stop_mode == "atr_dual" else "fixed_sl"
+                to_close.append((pos, exit_price, reason, minute_ts))
                 continue
 
             trail_triggered, newly_activated = check_trailing_tp(
@@ -377,14 +406,29 @@ class BacktestEngine:
             self._close_position(pos, exit_price, reason, ts)
 
     def _check_stops_hour(self, current_ts: int, data: dict):
-        """Hourly-close fallback for symbols without minute data."""
+        """Hourly checks: soft stop (atr_dual, close-confirmed on the just-closed
+        bar, ALL positions) + hard/trailing close-only fallback for symbols
+        without minute data."""
+        HOUR_MS = 3600_000
         to_close = []
         for pos in self.positions:
-            if pos.symbol in self._minute_data:
-                continue  # handled on minute grid
             if pos.symbol not in data:
                 continue
             hourly_df, _ = data[pos.symbol]
+
+            # --- 软止损：检查刚收盘的那根 1H（入场 bar 收盘即第一次检查）---
+            if (self.stop_mode == "atr_dual" and pos.soft_stop_pct > 0
+                    and pos.opened_ms <= current_ts - HOUR_MS):
+                closed_bar = hourly_df[hourly_df["open_time"] == current_ts - HOUR_MS]
+                if not closed_bar.empty:
+                    bar_close = float(closed_bar.iloc[0]["close"])
+                    if check_fixed_sl(pos.side, pos.entry_price, bar_close, pos.soft_stop_pct):
+                        exit_price = apply_slippage(bar_close, pos.side, is_entry=False)
+                        to_close.append((pos, exit_price, "soft_sl", current_ts))
+                        continue
+
+            if pos.symbol in self._minute_data:
+                continue  # 硬止损/移动止盈在分钟网格处理
             bar = hourly_df[hourly_df["open_time"] == current_ts]
             if bar.empty:
                 continue
@@ -396,9 +440,11 @@ class BacktestEngine:
 
             extreme_price = pos.highest_price if pos.side == "LONG" else pos.lowest_price
 
-            if check_fixed_sl(pos.side, pos.entry_price, current_price, self.fixed_stop_loss_pct):
+            hard_pct = pos.hard_stop_pct or self.fixed_stop_loss_pct
+            if check_fixed_sl(pos.side, pos.entry_price, current_price, hard_pct):
                 exit_price = apply_slippage(current_price, pos.side, is_entry=False)
-                to_close.append((pos, exit_price, "fixed_sl", current_ts))
+                reason = "hard_sl" if self.stop_mode == "atr_dual" else "fixed_sl"
+                to_close.append((pos, exit_price, reason, current_ts))
                 continue
 
             trail_triggered, newly_activated = check_trailing_tp(
@@ -421,7 +467,8 @@ class BacktestEngine:
 
     def _close_position(self, pos: BacktestPosition, exit_price: float, reason: str, ts: int):
         """Close a position and record the trade."""
-        notional = self.position_size * self.leverage
+        notional = pos.notional or self.position_size * self.leverage
+        margin = pos.margin or self.position_size
 
         if pos.side == "LONG":
             pnl = (exit_price - pos.entry_price) / pos.entry_price * notional
@@ -447,7 +494,7 @@ class BacktestEngine:
         )
         self.trades.append(trade)
         self.positions.remove(pos)
-        self.balance += self.position_size + net_pnl
+        self.balance += margin + net_pnl
 
     def _close_remaining(self, last_ts: int, data: dict):
         """Force-close any open positions at the last bar's close price."""
@@ -462,11 +509,10 @@ class BacktestEngine:
             self._close_position(pos, exit_price, "backtest_end", last_ts)
 
     def _calc_equity(self, current_ts: int, data: dict) -> float:
-        """Calculate total equity = balance + unrealized PnL of open positions."""
+        """Calculate total equity = balance + margins + unrealized PnL."""
         equity = self.balance
-        notional = self.position_size * self.leverage
-
         for pos in self.positions:
+            equity += pos.margin or self.position_size
             if pos.symbol not in data:
                 continue
             hourly_df, _ = data[pos.symbol]
@@ -474,12 +520,11 @@ class BacktestEngine:
             if bar.empty:
                 continue
             price = float(bar.iloc[0]["close"])
+            notional = pos.notional or self.position_size * self.leverage
 
             if pos.side == "LONG":
                 unrealized = (price - pos.entry_price) / pos.entry_price * notional
             else:
                 unrealized = (pos.entry_price - price) / pos.entry_price * notional
             equity += unrealized
-
-        equity += len(self.positions) * self.position_size
         return equity
