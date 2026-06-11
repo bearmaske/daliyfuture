@@ -75,6 +75,28 @@ def calculate_atr(highs: List[float], lows: List[float], closes: List[float],
     return atr
 
 
+def compute_stop_distances(atr: float, entry_price: float) -> tuple[float, float]:
+    """软/硬止损距离（占入场价的比例）。
+    软 = clamp(SOFT_STOP_ATR_MULT × ATR / 价格, floor=SOFT_STOP_FLOOR_PCT, cap=HARD_STOP_CAP_PCT)
+    硬 = min(HARD_STOP_MULT × 软, HARD_STOP_CAP_PCT)。软 ≤ 硬 恒成立。
+    ATR 缺失（=0）时退化为 floor。"""
+    if atr <= 0 or entry_price <= 0:
+        soft = config.SOFT_STOP_FLOOR_PCT
+    else:
+        soft = max(config.SOFT_STOP_FLOOR_PCT,
+                   config.SOFT_STOP_ATR_MULT * atr / entry_price)
+    soft = min(soft, config.HARD_STOP_CAP_PCT)
+    hard = min(config.HARD_STOP_MULT * soft, config.HARD_STOP_CAP_PCT)
+    return soft, hard
+
+
+def compute_position_size(soft_stop_pct: float) -> tuple[float, float]:
+    """等风险仓位：名义 = RISK_PER_TRADE_USD / 软止损%，封顶 MAX_NOTIONAL_USD。
+    返回 (名义, 保证金)。"""
+    notional = min(config.RISK_PER_TRADE_USD / soft_stop_pct, config.MAX_NOTIONAL_USD)
+    return notional, notional / config.LEVERAGE
+
+
 def check_fixed_sl(side: str, entry_price: float, current_price: float, sl_pct: float) -> bool:
     """Fixed stop loss: close if price moves sl_pct against entry."""
     if side == "LONG":

@@ -1,5 +1,5 @@
 import pytest
-from risk import check_fixed_sl, check_trailing_tp, calculate_atr
+from risk import check_fixed_sl, check_trailing_tp, calculate_atr, compute_stop_distances, compute_position_size
 
 
 def test_fixed_sl_long_not_triggered():
@@ -119,3 +119,55 @@ def test_atr_mismatched_lengths_returns_zero():
 def test_atr_non_positive_period_returns_zero():
     assert calculate_atr([1.0] * 16, [1.0] * 16, [1.0] * 16, period=0) == 0.0
     assert calculate_atr([1.0] * 16, [1.0] * 16, [1.0] * 16, period=-1) == 0.0
+
+
+# ---------- compute_stop_distances / compute_position_size ----------
+
+
+def test_stop_distances_zero_atr_falls_back_to_floor():
+    soft, hard = compute_stop_distances(0.0, 100.0)
+    assert soft == pytest.approx(0.02)
+    assert hard == pytest.approx(0.04)
+
+
+def test_stop_distances_calm_coin_floor_binds():
+    # 1.5×1/100 = 1.5% < 2% floor → (2%, 4%)
+    soft, hard = compute_stop_distances(1.0, 100.0)
+    assert soft == pytest.approx(0.02)
+    assert hard == pytest.approx(0.04)
+
+
+def test_stop_distances_volatile_coin_scales():
+    # 1.5×2/100 = 3% → (3%, 6%)
+    soft, hard = compute_stop_distances(2.0, 100.0)
+    assert soft == pytest.approx(0.03)
+    assert hard == pytest.approx(0.06)
+
+
+def test_stop_distances_hard_cap_binds_first():
+    # 1.5×2.4/100 = 3.6% → hard = min(7.2%, 6%) = 6%
+    soft, hard = compute_stop_distances(2.4, 100.0)
+    assert soft == pytest.approx(0.036)
+    assert hard == pytest.approx(0.06)
+
+
+def test_stop_distances_extreme_atr_soft_capped_no_inversion():
+    # 1.5×5/100 = 7.5% → soft 封顶 6%，hard=6%；软 ≤ 硬 恒成立
+    soft, hard = compute_stop_distances(5.0, 100.0)
+    assert soft == pytest.approx(0.06)
+    assert hard == pytest.approx(0.06)
+    assert soft <= hard
+
+
+def test_position_size_baseline_matches_status_quo():
+    # 软 2% → 名义 min(40/0.02, 2000)=2000，保证金 400 —— 与现状完全一致
+    notional, margin = compute_position_size(0.02)
+    assert notional == pytest.approx(2000.0)
+    assert margin == pytest.approx(400.0)
+
+
+def test_position_size_scales_down_with_wider_stop():
+    # 软 4% → 名义 1000，保证金 200
+    notional, margin = compute_position_size(0.04)
+    assert notional == pytest.approx(1000.0)
+    assert margin == pytest.approx(200.0)
