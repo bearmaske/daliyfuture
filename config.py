@@ -34,6 +34,18 @@ class Config:
     TRAILING_DRAWDOWN_PCT: float = 0.015    # exit when price retraces 1.5% from extreme
     FIXED_STOP_LOSS_PCT: float = 0.02       # fixed stop loss 2% from entry
 
+    # Dual-layer ATR-adaptive stop (see docs/superpowers/specs/2026-06-11-atr-dual-stop-design.md)
+    # "fixed"    = 旧逻辑：交易所 STOP_MARKET 挂在 entry ± FIXED_STOP_LOSS_PCT
+    # "atr_dual" = 新逻辑：软止损(ATR 自适应, 1H 收盘确认, 本地) + 硬止损(2×软, 交易所挂单)
+    STOP_MODE: str = "atr_dual"
+    ATR_PERIOD: int = 14               # 1H K线 Wilder ATR 周期
+    SOFT_STOP_ATR_MULT: float = 1.5    # 软止损 = 1.5 × ATR / 入场价
+    SOFT_STOP_FLOOR_PCT: float = 0.02  # 软止损下限 2%
+    HARD_STOP_MULT: float = 2.0        # 硬止损 = 2 × 软止损
+    HARD_STOP_CAP_PCT: float = 0.06    # 硬止损上限 6%（软止损也以此封顶，保证 软 ≤ 硬）
+    RISK_PER_TRADE_USD: float = 40.0   # 单笔风险额：名义 = 40 / 软止损%
+    MAX_NOTIONAL_USD: float = 2000.0   # 名义上限 = 现状 POSITION_SIZE × LEVERAGE，只缩不放大
+
     # Global Drawdown Circuit Breaker
     MAX_DRAWDOWN_PCT: float = 0.20  # force-close all if total assets drop 20% from initial
     COOLDOWN_HOURS: int = 24        # cooldown period after circuit breaker triggers
