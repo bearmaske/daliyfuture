@@ -1,5 +1,5 @@
 import pytest
-from risk import check_fixed_sl, check_trailing_tp, calculate_atr, compute_stop_distances, compute_position_size
+from risk import check_fixed_sl, check_trailing_tp, calculate_atr, compute_stop_distances, compute_position_size, _pos_hard_stop_pct, _pos_margin, calculate_pnl
 
 
 def test_fixed_sl_long_not_triggered():
@@ -171,3 +171,27 @@ def test_position_size_scales_down_with_wider_stop():
     notional, margin = compute_position_size(0.04)
     assert notional == pytest.approx(1000.0)
     assert margin == pytest.approx(200.0)
+
+
+# ---------- 仓位字段回退助手 ----------
+
+
+def test_pos_helpers_use_position_fields():
+    pos = {"hard_stop_pct": 0.05, "position_size": 250.0}
+    assert _pos_hard_stop_pct(pos) == 0.05
+    assert _pos_margin(pos) == 250.0
+
+
+def test_pos_helpers_fall_back_for_legacy_positions():
+    # 存量仓位无新字段（或为 None）→ 回退 config
+    from config import config
+    assert _pos_hard_stop_pct({}) == config.FIXED_STOP_LOSS_PCT
+    assert _pos_hard_stop_pct({"hard_stop_pct": None}) == config.FIXED_STOP_LOSS_PCT
+    assert _pos_margin({}) == config.POSITION_SIZE
+    assert _pos_margin({"position_size": None}) == config.POSITION_SIZE
+
+
+def test_calculate_pnl_fallback_uses_position_size_param():
+    # 无 quantity 时用名义公式：1% × margin × LEVERAGE(5)
+    pnl = calculate_pnl("LONG", 100.0, 101.0, quantity=None, position_size=200.0)
+    assert pnl == pytest.approx(0.01 * 200.0 * 5)

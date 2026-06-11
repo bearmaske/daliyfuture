@@ -40,18 +40,29 @@ def _position_age(opened_at: str) -> str:
     return f"{minutes}m"
 
 
-def calculate_pnl(side: str, entry_price: float, exit_price: float, quantity: float = None) -> float:
+def _pos_hard_stop_pct(pos: dict) -> float:
+    """硬止损距离：仓位字段优先，存量仓位回退 FIXED_STOP_LOSS_PCT。"""
+    return pos.get("hard_stop_pct") or config.FIXED_STOP_LOSS_PCT
+
+
+def _pos_margin(pos: dict) -> float:
+    """本笔保证金：仓位字段优先，存量仓位回退 POSITION_SIZE。"""
+    return pos.get("position_size") or config.POSITION_SIZE
+
+
+def calculate_pnl(side: str, entry_price: float, exit_price: float,
+                  quantity: float = None, position_size: float = None) -> float:
     """Calculate PnL. When quantity is given, uses qty × (exit − entry) which
     matches Binance's exchange-side accounting. Without quantity, falls back to
-    the notional formula (used for open-position unrealized previews where the
-    displayed quantity hasn't been reconciled yet)."""
+    the notional formula (position_size × leverage; 等风险缩仓后各笔不同)."""
     if quantity is not None and quantity > 0:
         if side == "LONG":
             return (exit_price - entry_price) * quantity
         return (entry_price - exit_price) * quantity
+    size = position_size or config.POSITION_SIZE
     if side == "LONG":
-        return (exit_price - entry_price) / entry_price * config.POSITION_SIZE * config.LEVERAGE
-    return (entry_price - exit_price) / entry_price * config.POSITION_SIZE * config.LEVERAGE
+        return (exit_price - entry_price) / entry_price * size * config.LEVERAGE
+    return (entry_price - exit_price) / entry_price * size * config.LEVERAGE
 
 
 def calculate_atr(highs: List[float], lows: List[float], closes: List[float],
@@ -311,10 +322,11 @@ def check_stop_loss(exchange: Exchange, state_mgr: StateManager):
                 profit_pct = (pos["entry_price"] - current_price) / pos["entry_price"] * 100
                 extreme_label = "最低"
 
+            hard_pct = _pos_hard_stop_pct(pos)
             fixed_sl_price = (
-                pos["entry_price"] * (1 - config.FIXED_STOP_LOSS_PCT)
+                pos["entry_price"] * (1 - hard_pct)
                 if pos["side"] == "LONG"
-                else pos["entry_price"] * (1 + config.FIXED_STOP_LOSS_PCT)
+                else pos["entry_price"] * (1 + hard_pct)
             )
             trail_stop_price = (
                 extreme_price * (1 - config.TRAILING_DRAWDOWN_PCT)
@@ -330,7 +342,7 @@ def check_stop_loss(exchange: Exchange, state_mgr: StateManager):
             else:
                 _replace_stop_order(exchange, state_mgr, pos)
                 if check_fixed_sl(pos["side"], pos["entry_price"], current_price,
-                                  config.FIXED_STOP_LOSS_PCT):
+                                  hard_pct):
                     _close_position(exchange, state_mgr, pos, current_price, "固定止损(兜底)")
                     continue
 
@@ -386,8 +398,9 @@ def check_stop_loss(exchange: Exchange, state_mgr: StateManager):
             else:
                 trailing_label = f"待激活(需浮盈≥{config.TRAILING_ACTIVATION_PCT*100:.0f}%)"
 
-            unrealized = calculate_pnl(pos["side"], pos["entry_price"], current_price, pos.get("quantity"))
-            unrealized_pct = unrealized / config.POSITION_SIZE * 100
+            unrealized = calculate_pnl(pos["side"], pos["entry_price"], current_price,
+                                       pos.get("quantity"), position_size=_pos_margin(pos))
+            unrealized_pct = unrealized / _pos_margin(pos) * 100
             age = _position_age(pos.get("opened_at"))
 
             logger.info(
@@ -410,9 +423,10 @@ def check_stop_loss(exchange: Exchange, state_mgr: StateManager):
 def _replace_stop_order(exchange: Exchange, state_mgr, pos: dict):
     """Re-place the STOP_MARKET fixed SL order."""
     try:
+        hard_pct = _pos_hard_stop_pct(pos)
         raw_sl = (
-            pos["entry_price"] * (1 - config.FIXED_STOP_LOSS_PCT) if pos["side"] == "LONG"
-            else pos["entry_price"] * (1 + config.FIXED_STOP_LOSS_PCT)
+            pos["entry_price"] * (1 - hard_pct) if pos["side"] == "LONG"
+            else pos["entry_price"] * (1 + hard_pct)
         )
         sl_price = exchange.round_stop_price(pos["symbol"], raw_sl, pos["side"])
 
@@ -485,9 +499,9 @@ def _record_position_close(
         close_order_id=close_order_id,
         opened_at=pos["opened_at"],
     )
-    state_mgr.update_balance(config.POSITION_SIZE + raw_pnl)
+    state_mgr.update_balance(_pos_margin(pos) + raw_pnl)
 
-    pnl_pct = raw_pnl / config.POSITION_SIZE * 100
+    pnl_pct = raw_pnl / _pos_margin(pos) * 100
     age = _position_age(pos.get("opened_at"))
     logger.info(
         "[平仓] %s %s (%s) | 持仓 %s | 入场 %.4f → 成交价 %.4f | "
@@ -536,7 +550,7 @@ def _close_position(
 
         _record_position_close(state_mgr, pos, actual_exit, executed_qty, close_order_id, reason)
 
-        pnl_pct = calculate_pnl(pos["side"], pos["entry_price"], actual_exit, executed_qty) / config.POSITION_SIZE * 100
+        pnl_pct = calculate_pnl(pos["side"], pos["entry_price"], actual_exit, executed_qty) / _pos_margin(pos) * 100
         age = _position_age(pos.get("opened_at"))
         logger.info(
             "[平仓] %s %s (%s) | 持仓 %s | 信号价 %.4f → 成交价 %.4f (滑点 %+.3f%%) | "
