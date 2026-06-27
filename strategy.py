@@ -293,11 +293,16 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
         "24H高低不满足": 0,
         "6H中轨不满足": 0,
         "无突破": 0,
+        "阶段不符": 0,
         "异常": 0,
     }
 
-    # +2 for SMA slope comparison, +1 to discard unclosed candle
+    # +2 for SMA slope comparison, +1 to discard unclosed candle. Phase filter
+    # replays the full daily BB timeline, so fetch enough history to capture the
+    # current phase's start.
     daily_kline_limit = config.SMA_PERIOD + 3
+    if config.PHASE_FILTER_ENABLED:
+        daily_kline_limit = max(daily_kline_limit, config.PHASE_DAILY_LOOKBACK)
     # Rolling SMA needs SMA_PERIOD*24 + slope-step 24h + unclosed bar
     rolling_hours_needed = config.SMA_PERIOD * 24 + 24
     # Need: BB_PERIOD closed bars + 24 lookback bars + 1 signal bar + 1 unclosed
@@ -499,6 +504,36 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
                 return
 
             signals_count += 1
+
+            # ── Phase filter overlay: gate by daily BB phase + first-trade-per-phase ──
+            if config.PHASE_FILTER_ENABLED:
+                daily_klines_pf = data.get("daily")
+                if not daily_klines_pf:
+                    logger.info("[阶段] %s 无日线数据,阶段过滤跳过本信号", symbol)
+                    skip_counts["阶段不符"] += 1
+                    return
+                d_closed = daily_klines_pf[:-1]  # drop unclosed
+                d_closes_pf = [float(k[4]) for k in d_closed]
+                d_open_times = [int(k[0]) for k in d_closed]
+                phase, phase_start_ms = compute_phase_state(
+                    d_closes_pf, d_open_times,
+                    period=config.PHASE_BB_PERIOD, std_dev=config.PHASE_BB_STD,
+                )
+                if not phase_allows(trend, phase):
+                    logger.info("[阶段] %s %s 信号被过滤 | 当前日线阶段: %s",
+                                symbol, trend, phase or "无")
+                    skip_counts["阶段不符"] += 1
+                    return
+                if state_mgr.get_traded_phase(symbol) == phase_start_ms:
+                    logger.info("[阶段] %s %s 本阶段已交易过(起始 %d),跳过",
+                                symbol, trend, phase_start_ms)
+                    skip_counts["阶段不符"] += 1
+                    return
+                # mark this phase as traded; recorded just before opening
+                _pf_phase_start = phase_start_ms
+            else:
+                _pf_phase_start = None
+
             if opened >= available_slots:
                 if not slots_exhausted_logged:
                     logger.info("[策略] 仓位已满,信号 %s 暂不开仓 (后续信号同样跳过)", symbol)
@@ -511,6 +546,8 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
 
             _open_position(exchange, state_mgr, symbol, trend, current_price, data["hourly"])
             opened += 1
+            if config.PHASE_FILTER_ENABLED and _pf_phase_start is not None:
+                state_mgr.set_traded_phase(symbol, _pf_phase_start)
 
         except Exception as e:
             logger.error("[策略] %s 处理异常: %s", symbol, e)
