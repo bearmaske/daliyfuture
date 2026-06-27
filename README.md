@@ -6,7 +6,7 @@
 
 ### 入场逻辑
 
-三层过滤 + 优先排序：
+多层过滤 + 优先排序：
 
 1. **选币**：24h 成交额 Top-50 池（默认），排除稳定币对和股票/预上市类永续（TSLA/COIN/MSTR 等）。候选需满足 24h 成交额 ≥ `MIN_QUOTE_VOLUME_24H`（默认 $50M）。
 
@@ -20,30 +20,40 @@
    - 6H 中轨过滤由 `H6_MIDDLE_FILTER_ENABLED` 开关控制（默认开启）
    - 信号在 1H 收盘确认，下一根 1M 开盘价（市价单）入场
 
-4. **交易量优先**：多信号并发时，按 24h 成交量从大到小排序开仓，优先流动性好的币种。
+4. **日线阶段闸门 + 同阶段只做第一笔**（`PHASE_FILTER_ENABLED`，默认开启）：在上述信号之上再叠加一层日线布林（20,2）阶段过滤，**不改原买点，只决定信号是否允许做**——
+   - 上涨阶段（日线收盘突破布林上轨开始，跌破中轨结束）内**只允许做多**；下跌阶段（跌破下轨开始，涨破中轨结束）内**只允许做空**；不符方向的信号过滤掉
+   - 同一币种、同一阶段**只做第一笔**有效信号，之后同向信号全部跳过，直到进入新阶段才重新计算
+   - 阶段只用已收盘日 K 判定（无未来函数）；"本阶段已交易"标记持久化到 `state.json`，重启沿用
+
+5. **交易量优先**：多信号并发时，按 24h 成交量从大到小排序开仓，优先流动性好的币种。
 
 ### 出场逻辑
 
-每笔持仓同时设置两道出场线，任意触发即平仓：
+出场机制由 `EXIT_MODE` 控制，默认 `phase_bb`。
 
-| 类型 | 参数 | 说明 |
-|------|------|------|
-| 固定止损 | `FIXED_STOP_LOSS_PCT = 2%` | 开仓后立即在 Binance 挂 `STOP_MARKET` 订单，由交易所直接执行 |
-| 激活式移动止盈 | `TRAILING_ACTIVATION_PCT = 3%` | 浮盈达到 3% 后激活，本地轮询触发 |
-| 移动止盈回撤 | `TRAILING_DRAWDOWN_PCT = 1.5%` | 激活后，从最有利价格回撤 1.5% 出场 |
+#### `phase_bb`（默认）— 1H 收盘出场
 
-**固定止损**：开仓后立即通过 `POST /fapi/v1/algoOrder`（`algoType=CONDITIONAL`）在 Binance 挂 `STOP_MARKET` 条件单（止损价 = 入场价 ± 2%）。止损由交易所直接执行，不依赖 bot 在线。每 60 秒查询订单状态：
-- `FILLED` → 本地记录平仓，撤销移动止盈单（OCO）
-- `CANCELED/EXPIRED` → 自动重新挂单
-- 查询失败 → 本地价格检查兜底
+每根 1H 收盘后检查一次，满足任一条件即市价平仓：
 
-**移动止盈**：两层机制配合，消除轮询盲区：
+| 出场条件 | 说明 |
+|------|------|
+| 1H 布林中轨穿越 | 多单：1H 收盘价跌破 1H 布林中轨（20,2）；空单：涨破中轨 |
+| 3.5% 确认回撤 | 多单：从入场以来**已确认**的最高点回撤 ≥ 3.5%；空单：从最低点反弹 ≥ 3.5%（`PHASE_EXIT_TRAILING_PCT`） |
 
-1. **WebSocket 实时激活**（`watcher.py`）：后台订阅 `<symbol>@markPrice` 流，每秒收到标记价格。浮盈达到 3% 时立刻以**当时最高价**为激活价，通过 `POST /fapi/v1/algoOrder` 挂 `TRAILING_STOP_MARKET`（回调率 1.5%，`workingType=MARK_PRICE`）。挂单成功后自动取消订阅。
-2. **交易所实时追踪**：`TRAILING_STOP_MARKET` 挂上后，交易所实时跟踪最高/最低价，回撤 1.5% 自动触发，不依赖 bot 轮询。
-3. **轮询兜底**（每 60 秒）：查询移动止盈单状态，`FILLED` 撤销固定止损单并记录平仓；`CANCELED/EXPIRED` 用当前极值价重新挂单；WebSocket 挂单失败时本地逻辑托底。
+- "已确认极值"只取**当前 1H 之前**已形成的高/低点（排除当前 K 与入场 K），避免同一根 K 内先创新高又立刻按该高低点触发回撤的次序失真。
+- 仓位规模沿用等风险名义（与 `atr_dual` 同源：名义 = `RISK_PER_TRADE_USD` / 软止损%，封顶 `MAX_NOTIONAL_USD`）。
+- **灾难止损**：另在交易所挂一道很宽的 `STOP_MARKET`（`CATASTROPHE_STOP_PCT`，默认 8%），**仅**用于 bot 掉线/跳空兜底——正常情况下中轨/3.5% 出场会先触发。可用 `CATASTROPHE_STOP_ENABLED=False` 关闭（关闭后该仓只靠相位出场，不挂任何止损）。
 
-两个交易所订单形成手动 OCO：任意一个触发，自动撤销另一个。
+> ⚠️ `phase_bb` 是**回测为负**（2025-06→2026-06 约 −12.4%、毛 edge≈0）的前向观察配置，**不是盈利预期**；实现与回测结论见 `docs/superpowers/plans/2026-06-27-phase-filter-live.md`。
+
+#### `atr_dual` / `fixed`（传统模式，`EXIT_MODE="atr_dual"` 切回）
+
+止损细分由 `STOP_MODE` 控制：
+
+- **软止损**（`atr_dual`）：ATR 自适应距离 `max(2%, 1.5×ATR14(1H)/价)`，仅在 1H 收盘确认（本地，每小时一次）。
+- **硬止损**：`min(2×软, 6%)`，开仓即在交易所挂 `STOP_MARKET`（防掉线/跳空）。
+- **激活式移动止盈**：浮盈达 `TRAILING_ACTIVATION_PCT`（3.5%）后挂 `TRAILING_STOP_MARKET`，回撤 `TRAILING_DRAWDOWN_PCT`（1.5%）出场；`watcher.py` 的 WebSocket 实时激活 + 每 60 秒轮询兜底。两个交易所订单构成手动 OCO，任一触发自动撤销另一个。
+- `STOP_MODE="fixed"`：回退到旧的固定 2% 止损（`FIXED_STOP_LOSS_PCT`）+ 移动止盈。
 
 > **接口说明**：Binance 已将 `STOP_MARKET` / `TRAILING_STOP_MARKET` 迁移至 Algo Order API（`/fapi/v1/algoOrder`），不再使用 `/fapi/v1/order`。主网和测试网均已支持。
 
@@ -214,13 +224,22 @@ daliyfuture/
 | `MAX_POSITIONS` | 10 | 最大同时持仓数 |
 | `LEVERAGE` | 5 | 杠杆倍数 |
 
-### 止损止盈
+### 出场 / 止损止盈
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `FIXED_STOP_LOSS_PCT` | 0.02 | 固定止损 2% |
-| `TRAILING_ACTIVATION_PCT` | 0.03 | 移动止盈激活阈值（浮盈≥3%） |
+| `EXIT_MODE` | "phase_bb" | 出场模式：`phase_bb`（1H 中轨穿越 + 3.5% 确认回撤）/ `atr_dual`（双层 ATR 止损 + 移动止盈） |
+| `PHASE_EXIT_TRAILING_PCT` | 0.035 | phase_bb：从确认极值回撤/反弹触发出场（3.5%） |
+| `CATASTROPHE_STOP_ENABLED` | True | phase_bb：是否保留宽幅灾难止损（掉线/跳空兜底） |
+| `CATASTROPHE_STOP_PCT` | 0.08 | 灾难止损距离（8%） |
+| `STOP_MODE` | "atr_dual" | atr_dual 模式止损：`atr_dual`（软/硬双层）/ `fixed`（固定 2%） |
+| `SOFT_STOP_ATR_MULT` | 1.5 | 软止损 = 1.5 × ATR14(1H) / 价（下限 `SOFT_STOP_FLOOR_PCT` 2%，上限 6%） |
+| `HARD_STOP_CAP_PCT` | 0.06 | 硬止损上限（= 2×软，封顶 6%；软止损也以此封顶） |
+| `RISK_PER_TRADE_USD` | 40 | 单笔风险额；等风险名义 = 40 / 软止损%（phase_bb 与 atr_dual 同用） |
+| `MAX_NOTIONAL_USD` | 2000 | 等风险名义上限 |
+| `TRAILING_ACTIVATION_PCT` | 0.035 | 移动止盈激活阈值（浮盈≥3.5%，atr_dual 模式） |
 | `TRAILING_DRAWDOWN_PCT` | 0.015 | 移动止盈激活后回撤触发线（1.5%） |
+| `FIXED_STOP_LOSS_PCT` | 0.02 | 固定止损（仅 `STOP_MODE="fixed"`） |
 
 ### 全局风控
 
@@ -242,6 +261,9 @@ daliyfuture/
 | `BB_PERIOD` | 20 | 布林带周期 |
 | `BB_STD` | 2.0 | 布林带标准差倍数 |
 | `H6_MIDDLE_FILTER_ENABLED` | True | 6H 布林中轨同侧过滤开关（叠加在日线趋势 + 1H 突破 + 24H 极值之上） |
+| `PHASE_FILTER_ENABLED` | True | 日线 BB 阶段闸门 + 同阶段只做第一笔（叠加在入场信号之上，详见入场逻辑） |
+| `PHASE_BB_PERIOD` / `PHASE_BB_STD` | 20 / 2.0 | 日线阶段布林参数 |
+| `PHASE_DAILY_LOOKBACK` | 250 | 重放阶段时间线所需的日线根数 |
 | `BNB_FEE_BURN_ENABLED` | False | 开启 BNB 抵扣手续费（9 折）；启动时同步 Binance 侧 `feeBurn` 开关为 ON |
 | `BNB_BALANCE_MIN_ALERT` | 0.05 | 合约钱包 BNB 余额低于此值时通知告警（仅在 `BNB_FEE_BURN_ENABLED=True` 时生效） |
 
