@@ -62,6 +62,21 @@ class Config:
     TREND_FILTER_MODE: str = "bb_middle"
     SMA_PERIOD: int = 20  # SMA period for daily trend check (independent of BB_PERIOD)
 
+    # ── Phase filter overlay (docs/superpowers/plans/2026-06-27-phase-filter-live.md) ──
+    # Additive daily-BB phase gate on entries + new 1H-close exits. Forward-test
+    # overlay; backtests net-negative (-12.4% over Jun2025–Jun2026). Paper only.
+    PHASE_FILTER_ENABLED: bool = True   # gate entries by daily BB phase + first-trade-per-phase
+    EXIT_MODE: str = "phase_bb"         # "atr_dual" (legacy stops) | "phase_bb" (1H BB-middle + 3.5% confirmed retrace)
+    PHASE_DAILY_LOOKBACK: int = 250     # daily bars fetched to replay the phase timeline
+    PHASE_BB_PERIOD: int = 20
+    PHASE_BB_STD: float = 2.0
+    PHASE_EXIT_TRAILING_PCT: float = 0.035  # 3.5% retrace from confirmed pre-bar extreme
+    # Catastrophe stop: in phase_bb mode the two new exits replace the ATR stops,
+    # but a wide exchange STOP_MARKET is kept for offline/gap protection. Set wide
+    # enough that BB-middle/3.5% exits normally fire first.
+    CATASTROPHE_STOP_ENABLED: bool = True
+    CATASTROPHE_STOP_PCT: float = 0.08
+
     # Bollinger Bands
     BB_PERIOD: int = 20
     BB_STD: float = 2.0
