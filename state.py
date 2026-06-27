@@ -88,6 +88,7 @@ class StateManager:
                 "trailing_order_id": None,
                 "open_order_id": open_order_id,
                 "opened_at": now_cn(),
+                "opened_ms": int(datetime.now(TZ_CN).replace(minute=0, second=0, microsecond=0).timestamp() * 1000),
                 "soft_stop_pct": soft_stop_pct,
                 "hard_stop_pct": hard_stop_pct,
                 "position_size": position_size,
@@ -154,6 +155,15 @@ class StateManager:
     def set_last_soft_check_hour(self, hour_key: str):
         with self._lock:
             self.state["last_soft_check_hour"] = hour_key
+        self.save()
+
+    @property
+    def last_phase_exit_hour(self):
+        return self.state.get("last_phase_exit_hour")
+
+    def set_last_phase_exit_hour(self, hour_key: str):
+        with self._lock:
+            self.state["last_phase_exit_hour"] = hour_key
         self.save()
 
     def get_traded_phase(self, symbol: str) -> Optional[int]:

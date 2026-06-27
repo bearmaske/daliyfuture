@@ -399,6 +399,70 @@ def _check_soft_stops(exchange: Exchange, state_mgr: StateManager, now: datetime
         state_mgr.set_last_soft_check_hour(prev_key or "")
 
 
+def _check_phase_exits(exchange: Exchange, state_mgr: StateManager, now: datetime = None):
+    """相位出场（EXIT_MODE=phase_bb）：每个整点后的第一个风控 tick，对每个持仓用
+    最近一根已收盘 1H 计算 1H 布林中轨 + 入场以来确认最高/最低点。满足
+    『收盘越过中轨』或『从确认极值回撤 3.5%』则市价平仓。本小时内开的仓先扛一根 K 线。"""
+    if config.EXIT_MODE != "phase_bb":
+        return
+    now = now or datetime.now(TZ_CN)
+    hour_key = now.strftime("%Y-%m-%d %H")
+    if state_mgr.last_phase_exit_hour == hour_key:
+        return
+    prev_key = state_mgr.last_phase_exit_hour
+    state_mgr.set_last_phase_exit_hour(hour_key)
+
+    hour_start = now.replace(minute=0, second=0, microsecond=0)
+    hour_start_ms = int(hour_start.timestamp() * 1000)
+    HOUR_MS = 3_600_000
+    stale = False
+    bb_period = config.PHASE_BB_PERIOD
+    trailing_pct = config.PHASE_EXIT_TRAILING_PCT
+
+    for pos in list(state_mgr.state.get("positions", [])):
+        opened_dt = _parse_position_dt(pos.get("opened_at"))
+        if opened_dt is None:
+            continue
+        # entry bar open_time (floor to the hour, ms)
+        opened_ms = pos.get("opened_ms")
+        if not opened_ms:
+            opened_ms = int(opened_dt.replace(minute=0, second=0, microsecond=0).timestamp() * 1000)
+
+        # need klines from entry through now + a BB warmup margin
+        hours_since_entry = max(0, int((hour_start_ms - opened_ms) // HOUR_MS))
+        limit = min(1000, hours_since_entry + bb_period + 3)
+        try:
+            kl = exchange.get_klines(pos["symbol"], "1h", limit)
+        except Exception as e:
+            logger.warning("[相位出场] %s 拉K线失败,本小时跳过: %s", pos["symbol"], e)
+            continue
+        if not kl or len(kl) < 2:
+            continue
+        # confirm the latest CLOSED bar is the one that just closed this hour
+        last_closed = kl[-2]
+        if int(last_closed[0]) < hour_start_ms - HOUR_MS:
+            stale = True  # Binance hasn't rolled the new bar yet; retry this hour
+            continue
+        closed_klines = kl[:-1]  # drop the in-progress candle
+
+        out = compute_phase_exit_inputs(closed_klines, opened_ms,
+                                        pos["entry_price"], bb_period)
+        if out is None:
+            continue
+        bar_close, bb_middle, pre_high, pre_low = out
+        pre_extreme = pre_high if pos["side"] == "LONG" else pre_low
+        reason = check_phase_exit(pos["side"], bar_close, bb_middle,
+                                  pre_extreme, trailing_pct)
+        if reason:
+            label = "1H中轨" if reason == "1h_bb_middle" else "回撤3.5%"
+            logger.info("[相位出场] %s %s | 1H收盘 %.4f | 中轨 %.4f | 确认极值 %.4f | %s | 平仓",
+                        pos["symbol"], pos["side"], bar_close, bb_middle, pre_extreme, label)
+            _close_position(exchange, state_mgr, pos, bar_close, f"相位出场({label})")
+
+    if stale:
+        state_mgr.set_last_phase_exit_hour(prev_key or "")
+
+
 def check_stop_loss(exchange: Exchange, state_mgr: StateManager):
     """Check all open positions.
 
@@ -411,7 +475,11 @@ def check_stop_loss(exchange: Exchange, state_mgr: StateManager):
 
     # Sync local state with exchange first — catches stops triggered while offline
     _sync_positions_with_exchange(exchange, state_mgr)
-    _check_soft_stops(exchange, state_mgr)
+
+    if config.EXIT_MODE == "phase_bb":
+        _check_phase_exits(exchange, state_mgr)
+    else:
+        _check_soft_stops(exchange, state_mgr)
 
     positions = list(state_mgr.state.get("positions", []))
     if not positions:
@@ -476,7 +544,7 @@ def check_stop_loss(exchange: Exchange, state_mgr: StateManager):
                                          extreme_price=extreme_price):
                     continue
                 trailing_label = "交易所挂单中"
-            elif activation_reached:
+            elif activation_reached and config.EXIT_MODE != "phase_bb":
                 # Threshold reached but no order — place now using current extreme_price
                 _place_trailing_order(exchange, state_mgr, pos, extreme_price)
                 trailing_order_id = pos.get("trailing_order_id")
