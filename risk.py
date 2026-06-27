@@ -148,6 +148,68 @@ def check_trailing_tp(
     return False, False
 
 
+def check_phase_exit(
+    side: str,
+    bar_close: float,
+    bb_middle: float,
+    pre_bar_extreme: float,
+    trailing_pct: float,
+):
+    """Phase-mode 1H-close exit. BB-middle cross takes precedence over the
+    3.5% confirmed-extreme retrace. Mirrors phase_filter_backtest._check_exits.
+    Returns "1h_bb_middle", "trailing_3.5pct", or None.
+    """
+    if side == "LONG":
+        if bar_close < bb_middle:
+            return "1h_bb_middle"
+        if bar_close <= pre_bar_extreme * (1 - trailing_pct):
+            return "trailing_3.5pct"
+    else:
+        if bar_close > bb_middle:
+            return "1h_bb_middle"
+        if bar_close >= pre_bar_extreme * (1 + trailing_pct):
+            return "trailing_3.5pct"
+    return None
+
+
+def compute_phase_exit_inputs(
+    closed_klines: list,
+    opened_ms: int,
+    entry_price: float,
+    bb_period: int = 20,
+):
+    """From CLOSED 1H klines, derive the inputs for check_phase_exit on the
+    just-closed bar. Returns (bar_close, bb_middle, pre_high, pre_low) or None.
+
+    closed_klines: list of [open_time, open, high, low, close, ...] (unclosed
+                   candle already dropped by caller), ascending by open_time.
+    pre_high/pre_low EXCLUDE the entry bar (open_time == opened_ms) and the
+    just-closed bar — matching the reference engine's exit-before-entry order.
+    Returns None while only the entry bar has closed (breathe one bar) or when
+    there are fewer than bb_period closed bars.
+    """
+    if len(closed_klines) < bb_period:
+        return None
+    last = closed_klines[-1]
+    last_ot = int(last[0])
+    if last_ot <= int(opened_ms):
+        return None  # still on/at the entry bar — breathe
+
+    closes = [float(k[4]) for k in closed_klines]
+    bb_middle = float(np.mean(closes[-bb_period:]))  # BB middle band == SMA(period)
+    bar_close = float(last[4])
+
+    pre_high = entry_price
+    pre_low = entry_price
+    for k in closed_klines[:-1]:                 # exclude just-closed bar
+        ot = int(k[0])
+        if ot <= int(opened_ms):                 # exclude entry bar and earlier
+            continue
+        pre_high = max(pre_high, float(k[2]))
+        pre_low = min(pre_low, float(k[3]))
+    return bar_close, bb_middle, pre_high, pre_low
+
+
 def check_drawdown(exchange: Exchange, state_mgr: StateManager) -> bool:
     """Check if total assets have dropped beyond MAX_DRAWDOWN_PCT.
     If triggered, force-close all positions and enter cooldown.
