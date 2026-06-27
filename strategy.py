@@ -576,9 +576,11 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
 
 
 def compute_entry_risk(hourly_klines: list, entry_price: float) -> dict:
-    """按 STOP_MODE 计算本笔的止损距离与等风险仓位。
+    """按 STOP_MODE / EXIT_MODE 计算本笔的止损距离与等风险仓位。
     atr_dual: ATR 自适应软/硬止损 + 名义 = RISK_PER_TRADE_USD/软止损%（封顶 MAX_NOTIONAL_USD）
-    fixed:    旧逻辑（soft_stop_pct=None → 风控循环跳过软止损检查）"""
+    phase_bb: 沿用 atr_dual 的等风险名义；软止损=None（出场交给相位逻辑），
+              硬止损=CATASTROPHE_STOP_PCT（仅掉线/跳空兜底）
+    fixed:    旧逻辑（soft_stop_pct=None）"""
     if config.STOP_MODE == "atr_dual" and hourly_klines:
         closed = hourly_klines[:-1]  # drop unclosed candle
         atr = calculate_atr(
@@ -589,6 +591,12 @@ def compute_entry_risk(hourly_klines: list, entry_price: float) -> dict:
         )
         soft_pct, hard_pct = compute_stop_distances(atr, entry_price)
         notional, margin = compute_position_size(soft_pct)
+        if config.EXIT_MODE == "phase_bb":
+            # sizing keeps the atr_dual notional; stops handed to phase logic
+            return {"atr": atr, "soft_stop_pct": None,
+                    "hard_stop_pct": (config.CATASTROPHE_STOP_PCT
+                                      if config.CATASTROPHE_STOP_ENABLED else None),
+                    "notional": notional, "margin": margin}
         return {"atr": atr, "soft_stop_pct": soft_pct, "hard_stop_pct": hard_pct,
                 "notional": notional, "margin": margin}
     return {"atr": 0.0, "soft_stop_pct": None,
@@ -658,23 +666,26 @@ def _open_position(
 
         close_side = "SELL" if side == "LONG" else "BUY"
 
-        # 硬止损 — STOP_MARKET at entry ± hard_pct（atr_dual）或 ± FIXED_STOP_LOSS_PCT（fixed）
-        try:
-            raw_sl = (
-                fill_price * (1 - hard_pct) if side == "LONG"
-                else fill_price * (1 + hard_pct)
-            )
-            sl_price = exchange.round_stop_price(symbol, raw_sl, side)
-            if sl_price <= 0:
-                logger.warning("[开仓] %s 止损价为 0（tick 过大），依赖本地轮询兜底", symbol)
-            else:
-                sl_order = exchange.place_stop_order(
-                    symbol, close_side, executed_qty, sl_price, position_side=side
+        # 硬止损 — STOP_MARKET（phase_bb: 仅掉线兜底，可关闭；atr_dual/fixed: 主止损）
+        if hard_pct is None:
+            logger.info("[开仓] %s 灾难止损已关闭(phase_bb),仅依赖相位出场", symbol)
+        else:
+            try:
+                raw_sl = (
+                    fill_price * (1 - hard_pct) if side == "LONG"
+                    else fill_price * (1 + hard_pct)
                 )
-                state_mgr.set_stop_order_id(pos["id"], sl_order.get("orderId"))
-                logger.info("[开仓] %s 止损单 orderId=%s 止损价 %.8f", symbol, sl_order.get("orderId"), sl_price)
-        except Exception as e:
-            logger.error("[开仓] %s 止损单下单失败: %s | 将由本地轮询兜底", symbol, e)
+                sl_price = exchange.round_stop_price(symbol, raw_sl, side)
+                if sl_price <= 0:
+                    logger.warning("[开仓] %s 止损价为 0（tick 过大），依赖本地轮询兜底", symbol)
+                else:
+                    sl_order = exchange.place_stop_order(
+                        symbol, close_side, executed_qty, sl_price, position_side=side
+                    )
+                    state_mgr.set_stop_order_id(pos["id"], sl_order.get("orderId"))
+                    logger.info("[开仓] %s 止损单 orderId=%s 止损价 %.8f", symbol, sl_order.get("orderId"), sl_price)
+            except Exception as e:
+                logger.error("[开仓] %s 止损单下单失败: %s | 将由本地轮询兜底", symbol, e)
 
         # 移动止盈单不在开仓时挂，等浮盈达到 3% 时由止损检查任务用当时最高价挂单
 
@@ -701,10 +712,14 @@ def _open_position(
         except Exception:
             pass
 
-        sl_line = (
-            fill_price * (1 - hard_pct) if side == "LONG"
-            else fill_price * (1 + hard_pct)
-        )
+        if hard_pct is None:
+            sl_text = "灾难止损: 关闭"
+        else:
+            sl_line = (
+                fill_price * (1 - hard_pct) if side == "LONG"
+                else fill_price * (1 + hard_pct)
+            )
+            sl_text = f"硬止损: {sl_line:.4f} ({hard_pct*100:.1f}%)"
         soft_msg = ""
         if soft_pct:
             soft_line = (
@@ -716,7 +731,7 @@ def _open_position(
             f"开仓 {side}",
             f"{symbol} | 成交价 {fill_price:.4f} | 数量 {executed_qty:g} | "
             f"保证金 ${margin:.0f}\n"
-            f"硬止损: {sl_line:.4f} ({hard_pct*100:.1f}%){soft_msg}{funding_msg}",
+            f"{sl_text}{soft_msg}{funding_msg}",
         )
     except BinanceAPIException as e:
         if getattr(e, "code", None) in POSITION_RISK_ERROR_CODES:

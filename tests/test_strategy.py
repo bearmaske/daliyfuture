@@ -86,6 +86,7 @@ def _mk_klines(n, high, low, close):
 
 def test_compute_entry_risk_atr_dual_scales_position(monkeypatch):
     monkeypatch.setattr(_cfg, "STOP_MODE", "atr_dual")
+    monkeypatch.setattr(_cfg, "EXIT_MODE", "atr_dual")  # avoid phase_bb branch
     # 30 根，high-low=2.4 恒定 → ATR=2.4 → 软=1.5×2.4/100=3.6%，硬=min(7.2%,6%)=6%
     kl = _mk_klines(30, high=101.2, low=98.8, close=100.0)
     r = compute_entry_risk(kl, 100.0)
@@ -108,6 +109,7 @@ def test_compute_entry_risk_fixed_mode_matches_legacy(monkeypatch):
 
 def test_compute_entry_risk_insufficient_klines_falls_back_to_floor(monkeypatch):
     monkeypatch.setattr(_cfg, "STOP_MODE", "atr_dual")
+    monkeypatch.setattr(_cfg, "EXIT_MODE", "atr_dual")  # avoid phase_bb branch
     kl = _mk_klines(5, high=101.0, low=99.0, close=100.0)  # 不足 ATR_PERIOD+1
     r = compute_entry_risk(kl, 100.0)
     # ATR=0 → 软 2% / 硬 4%，名义回到 $2000
