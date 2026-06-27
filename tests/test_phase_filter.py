@@ -41,3 +41,23 @@ def test_phase_allows_direction_gate():
     assert phase_allows("LONG", None) is False
     assert phase_allows("SHORT", "DOWN") is True
     assert phase_allows("SHORT", "UP") is False
+
+
+import os
+import tempfile
+from state import StateManager
+
+
+def test_traded_phase_roundtrip_and_persistence():
+    with tempfile.TemporaryDirectory() as d:
+        sf = os.path.join(d, "s.json")
+        bf = os.path.join(d, "s.backup.json")
+        sm = StateManager(sf, bf, initial_capital=1000.0)
+        sm.load()
+        assert sm.get_traded_phase("BTCUSDT") is None
+        sm.set_traded_phase("BTCUSDT", 1700000000000)
+        assert sm.get_traded_phase("BTCUSDT") == 1700000000000
+        # survives reload
+        sm2 = StateManager(sf, bf, initial_capital=1000.0)
+        sm2.load()
+        assert sm2.get_traded_phase("BTCUSDT") == 1700000000000

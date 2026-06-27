@@ -156,6 +156,16 @@ class StateManager:
             self.state["last_soft_check_hour"] = hour_key
         self.save()
 
+    def get_traded_phase(self, symbol: str) -> Optional[int]:
+        """phase_start_ms of the phase we last opened a trade in for `symbol`."""
+        val = self.state.get("traded_phases", {}).get(symbol)
+        return int(val) if val is not None else None
+
+    def set_traded_phase(self, symbol: str, phase_start_ms: int):
+        with self._lock:
+            self.state.setdefault("traded_phases", {})[symbol] = int(phase_start_ms)
+        self.save()
+
     def update_extreme_price(self, position_id: str, current_price: float):
         changed = False
         with self._lock:
@@ -401,4 +411,5 @@ class StateManager:
             "balance": self.initial_capital,
             "positions": [],
             "trade_history": [],
+            "traded_phases": {},
         }
