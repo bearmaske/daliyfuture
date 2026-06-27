@@ -416,7 +416,7 @@ def _check_phase_exits(exchange: Exchange, state_mgr: StateManager, now: datetim
     hour_start_ms = int(hour_start.timestamp() * 1000)
     HOUR_MS = 3_600_000
     stale = False
-    bb_period = config.PHASE_BB_PERIOD
+    bb_period = config.BB_PERIOD  # 1H BB period for the 1H exit middle band (not the daily PHASE_BB_PERIOD)
     trailing_pct = config.PHASE_EXIT_TRAILING_PCT
 
     for pos in list(state_mgr.state.get("positions", [])):
@@ -495,6 +495,10 @@ def check_stop_loss(exchange: Exchange, state_mgr: StateManager):
             stop_order_id = pos.get("stop_order_id")
             trailing_order_id = pos.get("trailing_order_id")
             trailing_activated = pos.get("trailing_activated", False)
+            # True when position was opened with CATASTROPHE_STOP_ENABLED=False;
+            # such positions carry hard_stop_pct=None and must NOT be managed by
+            # the fixed-SL block — they rely solely on phase exits.
+            catastrophe_disabled = pos.get("hard_stop_pct") is None
 
             if pos["side"] == "LONG":
                 extreme_price = pos["highest_price"]
@@ -505,11 +509,14 @@ def check_stop_loss(exchange: Exchange, state_mgr: StateManager):
                 profit_pct = (pos["entry_price"] - current_price) / pos["entry_price"] * 100
                 extreme_label = "最低"
 
-            hard_pct = _pos_hard_stop_pct(pos)
+            # Compute hard stop values only when the exchange stop is active;
+            # None signals "no exchange stop" to the logger below.
+            hard_pct = _pos_hard_stop_pct(pos) if not catastrophe_disabled else None
             fixed_sl_price = (
-                pos["entry_price"] * (1 - hard_pct)
-                if pos["side"] == "LONG"
-                else pos["entry_price"] * (1 + hard_pct)
+                (pos["entry_price"] * (1 - hard_pct)
+                 if pos["side"] == "LONG"
+                 else pos["entry_price"] * (1 + hard_pct))
+                if hard_pct is not None else None
             )
             trail_stop_price = (
                 extreme_price * (1 - config.TRAILING_DRAWDOWN_PCT)
@@ -518,16 +525,19 @@ def check_stop_loss(exchange: Exchange, state_mgr: StateManager):
             )
 
             # --- Fixed SL (exchange) ---
-            if stop_order_id:
-                if _check_exchange_order(exchange, state_mgr, pos,
-                                         stop_order_id, "固定止损", "trailing_order_id"):
-                    continue
-            else:
-                _replace_stop_order(exchange, state_mgr, pos)
-                if check_fixed_sl(pos["side"], pos["entry_price"], current_price,
-                                  hard_pct):
-                    _close_position(exchange, state_mgr, pos, current_price, "固定止损(兜底)")
-                    continue
+            # Skipped entirely when catastrophe stop was explicitly disabled at entry
+            # (pos["hard_stop_pct"] is None). Those positions rely on phase exits only.
+            if not catastrophe_disabled:
+                if stop_order_id:
+                    if _check_exchange_order(exchange, state_mgr, pos,
+                                             stop_order_id, "固定止损", "trailing_order_id"):
+                        continue
+                else:
+                    _replace_stop_order(exchange, state_mgr, pos)
+                    if check_fixed_sl(pos["side"], pos["entry_price"], current_price,
+                                      hard_pct):
+                        _close_position(exchange, state_mgr, pos, current_price, "固定止损(兜底)")
+                        continue
 
             # --- Trailing TP ---
             # Activation threshold: extreme_price >= entry * (1 + 3%)
@@ -586,15 +596,16 @@ def check_stop_loss(exchange: Exchange, state_mgr: StateManager):
             unrealized_pct = unrealized / _pos_margin(pos) * 100
             age = _position_age(pos.get("opened_at"))
 
+            fixed_sl_label = f"{fixed_sl_price:.4f}" if fixed_sl_price is not None else "灾难止损已关闭"
             logger.info(
                 "[止损] %s %s | 持仓 %s | 入场: %.4f | %s: %.4f | 现价: %.4f | "
-                "PnL: $%+.2f (%+.1f%%) | 固定止损: %.4f | 移动止盈: %s (线 %.4f) | 安全",
+                "PnL: $%+.2f (%+.1f%%) | 固定止损: %s | 移动止盈: %s (线 %.4f) | 安全",
                 pos["symbol"], pos["side"], age,
                 pos["entry_price"],
                 extreme_label, extreme_price,
                 current_price,
                 unrealized, unrealized_pct,
-                fixed_sl_price,
+                fixed_sl_label,
                 trailing_label,
                 trail_stop_price,
             )

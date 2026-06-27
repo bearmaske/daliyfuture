@@ -528,3 +528,53 @@ def test_check_stop_loss_dispatches_to_soft_stops(tmp_path, monkeypatch):
     check_stop_loss(ex, sm)
     mock_soft.assert_called_once()
     mock_phase.assert_not_called()
+
+
+# ---------- Fix 1: catastrophe-disabled positions skip fixed-SL management ----------
+
+
+def _add_phase_pos_no_catastrophe(sm, opened_at_str, opened_ms, side="LONG", entry=100.0):
+    """Position with hard_stop_pct=None — simulates CATASTROPHE_STOP_ENABLED=False at entry."""
+    pos = sm.add_position(symbol="CATUSDT", side=side, entry_price=entry,
+                          quantity=10.0, soft_stop_pct=0.03, hard_stop_pct=None,
+                          position_size=266.0)
+    pos["opened_at"] = opened_at_str
+    pos["opened_ms"] = opened_ms
+    # Overwrite hard_stop_pct to None (add_position may default it)
+    pos["hard_stop_pct"] = None
+    sm.save()
+    return pos
+
+
+# Test 10: phase_bb + hard_stop_pct=None → check_stop_loss must NOT place a stop order
+# and must NOT close the position via the 2% fixed-SL fallback.
+# We stub _check_phase_exits to a no-op so the phase exit doesn't close it either,
+# allowing us to verify the per-position fixed-SL block is skipped cleanly.
+def test_catastrophe_disabled_skips_stop_order_and_fixed_sl(tmp_path, monkeypatch):
+    """End-to-end: with EXIT_MODE='phase_bb' and hard_stop_pct=None, check_stop_loss
+    must not call exchange.place_stop_order and must not close the position via fixed SL,
+    even if the current price is far below the 2% fallback stop that _pos_hard_stop_pct
+    would otherwise return."""
+    monkeypatch.setattr(risk.config, "EXIT_MODE", "phase_bb")
+    monkeypatch.setattr(risk, "check_drawdown", lambda ex, sm: False)
+    monkeypatch.setattr(risk, "_sync_positions_with_exchange", lambda ex, sm: None)
+    # Stub _check_phase_exits to a no-op so phase logic doesn't close the position
+    monkeypatch.setattr(risk, "_check_phase_exits", MagicMock())
+
+    sm = _mk_state(tmp_path)
+    _add_phase_pos_no_catastrophe(sm, "2026-06-11 12:01:00", _12H_MS)
+
+    ex = MagicMock()
+    # Price is 10% below entry — would trip the 2% fallback stop if the block were entered
+    ex.get_price.return_value = 90.0
+
+    check_stop_loss(ex, sm)
+
+    # The position must remain open (no fixed-SL close)
+    assert len(sm.state["positions"]) == 1, (
+        "Position with hard_stop_pct=None must not be closed by the fixed-SL block"
+    )
+    # No exchange stop order must have been placed
+    ex.place_stop_order.assert_not_called(), (
+        "place_stop_order must not be called when catastrophe stop is disabled"
+    )
