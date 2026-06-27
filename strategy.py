@@ -347,7 +347,7 @@ def run_strategy(exchange: Exchange, state_mgr: StateManager):
     # before any order goes in. Trade-off: when (signals > available_slots),
     # winners are determined by data-arrival order, not 24h volume.
     mode = config.TREND_FILTER_MODE
-    needs_daily = mode in ("sma", "bb_middle")
+    needs_daily = mode in ("sma", "bb_middle") or config.PHASE_FILTER_ENABLED
     needs_h6 = config.H6_MIDDLE_FILTER_ENABLED
     available_slots = config.MAX_POSITIONS - state_mgr.position_count
     opened = 0
