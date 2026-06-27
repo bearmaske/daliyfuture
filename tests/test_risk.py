@@ -1,7 +1,7 @@
 import pytest
 from datetime import datetime
 from unittest.mock import MagicMock
-from risk import check_fixed_sl, check_trailing_tp, calculate_atr, compute_stop_distances, compute_position_size, _pos_hard_stop_pct, _pos_margin, calculate_pnl, _check_soft_stops
+from risk import check_fixed_sl, check_trailing_tp, calculate_atr, compute_stop_distances, compute_position_size, _pos_hard_stop_pct, _pos_margin, calculate_pnl, _check_soft_stops, _check_phase_exits, check_stop_loss
 from risk import TZ_CN
 import risk
 from state import StateManager
@@ -326,3 +326,205 @@ def test_soft_stop_stale_bar_retries_next_tick(tmp_path, monkeypatch):
     ex.get_order_fill.return_value = (96.5, 10.0)
     _check_soft_stops(ex, sm, now=NOW.replace(minute=2))
     assert sm.state["positions"] == []
+
+
+# ---------- 相位出场 (_check_phase_exits) ----------
+
+# Timestamps used across phase-exit tests.  NOW is reused from the soft-stop
+# section (2026-06-11 14:01 UTC+8).  The just-closed 1H bar opens at 13:00.
+
+_HOUR_MS = 3_600_000
+_13H_MS = int(datetime(2026, 6, 11, 13, 0, tzinfo=TZ_CN).timestamp() * 1000)
+_14H_MS = int(datetime(2026, 6, 11, 14, 0, tzinfo=TZ_CN).timestamp() * 1000)
+_12H_MS = int(datetime(2026, 6, 11, 12, 0, tzinfo=TZ_CN).timestamp() * 1000)
+_11H_MS = int(datetime(2026, 6, 11, 11, 0, tzinfo=TZ_CN).timestamp() * 1000)
+
+
+def _mk_kline(open_ms, close_val, high_val=None, low_val=None):
+    """Build a minimal kline row: [open_ms, open, high, low, close, vol, close_ms, ...]"""
+    if high_val is None:
+        high_val = close_val
+    if low_val is None:
+        low_val = close_val
+    return [open_ms, str(close_val), str(high_val), str(low_val), str(close_val),
+            "1000", open_ms + _HOUR_MS - 1, "0"]
+
+
+def _mk_phase_exchange(closed_bars, just_closed_close):
+    """Return a MagicMock Exchange whose get_klines returns:
+      closed_bars (already formed) + one unclosed bar at 14:00.
+    Also wires get_order_fill so _close_position can complete."""
+    unclosed = _mk_kline(_14H_MS, just_closed_close)
+    ex = MagicMock()
+    ex.get_klines.return_value = list(closed_bars) + [unclosed]
+    ex.get_order_fill.return_value = (just_closed_close, 10.0)
+    return ex
+
+
+def _build_closed_bars_20(just_closed_close, pre_bar_override=None, entry_bar_open_ms=_12H_MS):
+    """Build exactly 20 closed bars ending with the just-closed bar at 13:00.
+    - Bars 0-18: generic bars at 13:00 - 20h .. 13:00 - 2h, close=high=low=105.0
+    - Bar 19: just-closed bar at 13:00 with close=just_closed_close
+
+    If pre_bar_override is given it replaces the bar at index 18 (which sits
+    strictly between entry_bar_open_ms and the just-closed bar only when
+    entry_bar_open_ms < bar_18_open_ms < _13H_MS).
+    """
+    bars = []
+    for i in range(20):
+        open_ms = _13H_MS - (19 - i) * _HOUR_MS  # bar 0 → 13:00-19h, bar 19 → 13:00
+        if i == 19:
+            bars.append(_mk_kline(open_ms, just_closed_close))
+        elif pre_bar_override is not None and i == 18:
+            bars.append(pre_bar_override)
+        else:
+            bars.append(_mk_kline(open_ms, 105.0))
+    return bars
+
+
+def _add_phase_pos(sm, opened_at_str, opened_ms, side="LONG", entry=100.0):
+    """Add a position with the extra 'opened_ms' field required by _check_phase_exits."""
+    pos = sm.add_position(symbol="PHASUSDT", side=side, entry_price=entry,
+                          quantity=10.0, soft_stop_pct=0.03, hard_stop_pct=0.06,
+                          position_size=266.0)
+    pos["opened_at"] = opened_at_str
+    pos["opened_ms"] = opened_ms
+    sm.save()
+    return pos
+
+
+# Test 1: LONG exits when just-closed 1H close < BB middle (1h_bb_middle)
+def test_phase_exit_long_bb_middle_close(tmp_path, monkeypatch):
+    monkeypatch.setattr(risk.config, "EXIT_MODE", "phase_bb")
+    sm = _mk_state(tmp_path)
+    # Entry bar at 12:00, position opened before the just-closed bar at 13:00
+    _add_phase_pos(sm, "2026-06-11 12:01:00", _12H_MS)
+    # bars 0-18 close=105, bar 19 (just-closed, 13:00) close=103
+    # BB middle = mean of last 20 closes = (19*105 + 103)/20 = 104.9
+    # bar_close=103 < 104.9 → triggers "1h_bb_middle"
+    closed_bars = _build_closed_bars_20(103.0)
+    ex = _mk_phase_exchange(closed_bars, 103.0)
+    _check_phase_exits(ex, sm, now=NOW)
+    assert sm.state["positions"] == [], "LONG should be closed when close < BB middle"
+    ex.place_order.assert_called_once()
+
+
+# Test 2: LONG exits on 3.5% retrace from a confirmed pre-bar high
+def test_phase_exit_long_trailing_retrace(tmp_path, monkeypatch):
+    monkeypatch.setattr(risk.config, "EXIT_MODE", "phase_bb")
+    sm = _mk_state(tmp_path)
+    # Entry bar at 11:00; pre-bar at 12:00 (strictly between entry and 13:00 bar)
+    _add_phase_pos(sm, "2026-06-11 11:01:00", _11H_MS)
+    # pre-bar at 12:00 with high=110; entry_price=100 → pre_high=110
+    pre_bar = _mk_kline(_12H_MS, 105.0, high_val=110.0, low_val=100.0)
+    # just-closed close=106: above BB middle (~105.05) but ≤ 110 * 0.965 = 106.15
+    closed_bars = _build_closed_bars_20(106.0, pre_bar_override=pre_bar,
+                                        entry_bar_open_ms=_11H_MS)
+    ex = _mk_phase_exchange(closed_bars, 106.0)
+    _check_phase_exits(ex, sm, now=NOW)
+    assert sm.state["positions"] == [], "LONG should be closed on 3.5% retrace from pre-bar high"
+    ex.place_order.assert_called_once()
+
+
+# Test 3: LONG holds — close above BB middle, no retrace
+def test_phase_exit_long_holds_when_safe(tmp_path, monkeypatch):
+    monkeypatch.setattr(risk.config, "EXIT_MODE", "phase_bb")
+    sm = _mk_state(tmp_path)
+    _add_phase_pos(sm, "2026-06-11 12:01:00", _12H_MS)
+    # just-closed close=106: > BB middle ~104.9, pre_high=entry=100, no retrace condition
+    closed_bars = _build_closed_bars_20(106.0)
+    ex = _mk_phase_exchange(closed_bars, 106.0)
+    _check_phase_exits(ex, sm, now=NOW)
+    assert len(sm.state["positions"]) == 1, "LONG should hold when no exit condition met"
+    ex.place_order.assert_not_called()
+
+
+# Test 4: Breathe — position opened in the just-closed bar is NOT exited
+def test_phase_exit_breathe_entry_bar_is_just_closed(tmp_path, monkeypatch):
+    monkeypatch.setattr(risk.config, "EXIT_MODE", "phase_bb")
+    sm = _mk_state(tmp_path)
+    # opened_ms == 13:00_ms → same as last closed bar → compute_phase_exit_inputs returns None
+    _add_phase_pos(sm, "2026-06-11 13:00:30", _13H_MS)
+    closed_bars = _build_closed_bars_20(103.0)  # would normally trigger BB exit
+    ex = _mk_phase_exchange(closed_bars, 103.0)
+    _check_phase_exits(ex, sm, now=NOW)
+    assert len(sm.state["positions"]) == 1, "Position opened in just-closed bar must not be exited (breathe)"
+    ex.place_order.assert_not_called()
+
+
+# Test 5: Once per hour — two ticks in the same hour only call get_klines once
+def test_phase_exit_runs_once_per_hour(tmp_path, monkeypatch):
+    monkeypatch.setattr(risk.config, "EXIT_MODE", "phase_bb")
+    sm = _mk_state(tmp_path)
+    _add_phase_pos(sm, "2026-06-11 12:01:00", _12H_MS)
+    closed_bars = _build_closed_bars_20(106.0)  # safe close, position holds
+    ex = _mk_phase_exchange(closed_bars, 106.0)
+    _check_phase_exits(ex, sm, now=NOW)
+    _check_phase_exits(ex, sm, now=NOW.replace(minute=2))  # second tick same hour
+    assert ex.get_klines.call_count == 1, "get_klines should only be called once per hour"
+
+
+# Test 6: Disabled when EXIT_MODE != "phase_bb"
+def test_phase_exit_disabled_when_mode_not_phase_bb(tmp_path, monkeypatch):
+    monkeypatch.setattr(risk.config, "EXIT_MODE", "atr_dual")
+    sm = _mk_state(tmp_path)
+    _add_phase_pos(sm, "2026-06-11 12:01:00", _12H_MS)
+    closed_bars = _build_closed_bars_20(103.0)  # would trigger if enabled
+    ex = _mk_phase_exchange(closed_bars, 103.0)
+    _check_phase_exits(ex, sm, now=NOW)
+    assert len(sm.state["positions"]) == 1, "Position should be held when EXIT_MODE != phase_bb"
+    ex.get_klines.assert_not_called()
+
+
+# Test 7: SHORT closes when just-closed close > BB middle
+def test_phase_exit_short_bb_middle_close(tmp_path, monkeypatch):
+    monkeypatch.setattr(risk.config, "EXIT_MODE", "phase_bb")
+    sm = _mk_state(tmp_path)
+    _add_phase_pos(sm, "2026-06-11 12:01:00", _12H_MS, side="SHORT", entry=100.0)
+    # bars 0-18 close=105, bar 19 close=107: > BB middle ~104.95 → SHORT exits
+    closed_bars = _build_closed_bars_20(107.0)
+    ex = _mk_phase_exchange(closed_bars, 107.0)
+    _check_phase_exits(ex, sm, now=NOW)
+    assert sm.state["positions"] == [], "SHORT should be closed when close > BB middle"
+    ex.place_order.assert_called_once()
+
+
+# ---------- check_stop_loss dispatch exclusivity ----------
+
+
+def _mk_dispatch_state(tmp_path):
+    """Empty positions state — dispatch tests skip the per-position loop."""
+    sm = _mk_state(tmp_path)
+    return sm
+
+
+# Test 8: EXIT_MODE="phase_bb" → _check_phase_exits called, _check_soft_stops NOT called
+def test_check_stop_loss_dispatches_to_phase_exits(tmp_path, monkeypatch):
+    monkeypatch.setattr(risk.config, "EXIT_MODE", "phase_bb")
+    monkeypatch.setattr(risk, "check_drawdown", lambda ex, sm: False)
+    monkeypatch.setattr(risk, "_sync_positions_with_exchange", lambda ex, sm: None)
+    mock_phase = MagicMock()
+    mock_soft = MagicMock()
+    monkeypatch.setattr(risk, "_check_phase_exits", mock_phase)
+    monkeypatch.setattr(risk, "_check_soft_stops", mock_soft)
+    sm = _mk_dispatch_state(tmp_path)
+    ex = MagicMock()
+    check_stop_loss(ex, sm)
+    mock_phase.assert_called_once()
+    mock_soft.assert_not_called()
+
+
+# Test 9: EXIT_MODE="atr_dual" → _check_soft_stops called, _check_phase_exits NOT called
+def test_check_stop_loss_dispatches_to_soft_stops(tmp_path, monkeypatch):
+    monkeypatch.setattr(risk.config, "EXIT_MODE", "atr_dual")
+    monkeypatch.setattr(risk, "check_drawdown", lambda ex, sm: False)
+    monkeypatch.setattr(risk, "_sync_positions_with_exchange", lambda ex, sm: None)
+    mock_phase = MagicMock()
+    mock_soft = MagicMock()
+    monkeypatch.setattr(risk, "_check_phase_exits", mock_phase)
+    monkeypatch.setattr(risk, "_check_soft_stops", mock_soft)
+    sm = _mk_dispatch_state(tmp_path)
+    ex = MagicMock()
+    check_stop_loss(ex, sm)
+    mock_soft.assert_called_once()
+    mock_phase.assert_not_called()
