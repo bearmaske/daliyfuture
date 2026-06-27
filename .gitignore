@@ -18,3 +18,4 @@ env.bak
 # OS / editor / tooling junk
 .DS_Store
 .codegraph/
+.superpowers/
