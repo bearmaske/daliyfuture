@@ -165,6 +165,55 @@ def check_trend_bb_middle(closes: List[float], period: int = 20, std_dev: float 
     return None
 
 
+def compute_phase_state(
+    closes: List[float],
+    open_times: List[int],
+    period: int = 20,
+    std_dev: float = 2.0,
+) -> Tuple[Optional[str], int]:
+    """Replay daily BB to find the CURRENT phase and when it started.
+
+    UP   starts when close > upper band; ends when close < middle band.
+    DOWN starts when close < lower band; ends when close > middle band.
+    A phase persists across bars until its middle-band end condition fires.
+
+    `closes`/`open_times` are CLOSED daily bars (caller drops unclosed).
+    Returns (phase, phase_start_ms): phase ∈ {"UP","DOWN",None};
+    phase_start_ms is open_times[i] of the bar that started the phase (0 if None).
+    Mirrors backtesting/phase_filter_backtest.py:compute_phase_timeline.
+    """
+    phase: Optional[str] = None
+    phase_start_ms = 0
+    n = len(closes)
+    for i in range(n):
+        if i + 1 < period:
+            continue
+        window = closes[i - period + 1: i + 1]
+        upper, middle, lower = calculate_bollinger_bands(window, period, std_dev)
+        close = closes[i]
+
+        # End check first so same-bar transitions resolve cleanly.
+        if phase == "UP" and close < middle:
+            phase, phase_start_ms = None, 0
+        elif phase == "DOWN" and close > middle:
+            phase, phase_start_ms = None, 0
+
+        if phase is None:
+            if close > upper:
+                phase, phase_start_ms = "UP", int(open_times[i])
+            elif close < lower:
+                phase, phase_start_ms = "DOWN", int(open_times[i])
+
+    return phase, phase_start_ms
+
+
+def phase_allows(direction: str, phase: Optional[str]) -> bool:
+    """Phase gate: LONG only in UP, SHORT only in DOWN."""
+    return (direction == "LONG" and phase == "UP") or (
+        direction == "SHORT" and phase == "DOWN"
+    )
+
+
 def check_volatility_expanding(klines, short_period: int = 7, long_period: int = 28, threshold: float = 1.0) -> tuple:
     """Check if volatility is expanding by comparing short vs long ATR.
     Returns (is_expanding, short_atr, long_atr, ratio).
